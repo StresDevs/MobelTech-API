@@ -1,0 +1,67 @@
+import {
+  pgTable,
+  uuid,
+  varchar,
+  text,
+  timestamp,
+  date,
+  integer,
+  numeric,
+  pgEnum,
+} from 'drizzle-orm/pg-core';
+import { projects } from './projects';
+import { quotations } from './quotations';
+import { contractors } from './contractors';
+
+export const productionStatusEnum = pgEnum('production_status', [
+  'pending',
+  'in-progress',
+  'delayed',
+  'completed',
+]);
+
+export const productionPhaseEnum = pgEnum('production_phase', [
+  'cortado',
+  'canteado',
+  'ensamblado',
+  'instalacion',
+  'entregado',
+]);
+
+export const productionOrders = pgTable('production_orders', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id')
+    .notNull()
+    .references(() => projects.id),
+  quotationId: uuid('quotation_id').references(() => quotations.id),
+  assignedContractorId: uuid('assigned_contractor_id').references(
+    () => contractors.id,
+  ),
+  status: productionStatusEnum('status').notNull().default('pending'),
+  startDate: date('start_date').notNull(),
+  estimatedDeliveryDate: date('estimated_delivery_date').notNull(),
+  actualDeliveryDate: date('actual_delivery_date'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const productionItems = pgTable('production_items', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  productionOrderId: uuid('production_order_id')
+    .notNull()
+    .references(() => productionOrders.id, { onDelete: 'cascade' }),
+  description: text('description').notNull(),
+  quantity: integer('quantity').notNull().default(1),
+  progress: integer('progress').notNull().default(0),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const productionItemPhases = pgTable('production_item_phases', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  productionItemId: uuid('production_item_id')
+    .notNull()
+    .references(() => productionItems.id, { onDelete: 'cascade' }),
+  phase: productionPhaseEnum('phase').notNull(),
+  completed: varchar('completed', { length: 5 }).notNull().default('false'),
+  completedDate: timestamp('completed_date', { withTimezone: true }),
+});
