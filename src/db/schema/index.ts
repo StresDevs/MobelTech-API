@@ -3,6 +3,13 @@ export { clients, clientStatusEnum } from './clients';
 export { measurements, measurementStatusEnum } from './measurements';
 export { projects, projectStatusEnum } from './projects';
 export { quotations, quotationItems, quotationStatusEnum } from './quotations';
+export {
+  prequotations,
+  prequotationVersions,
+  prequotationLogs,
+  prequotationStatusEnum,
+  prequotationLogActionEnum,
+} from './prequotations';
 export { contractors, contractorStatusEnum } from './contractors';
 export { suppliers, materials, supplierStatusEnum } from './inventory';
 export {

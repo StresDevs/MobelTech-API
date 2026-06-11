@@ -7,7 +7,7 @@ import { z } from 'zod';
 
 const router = Router();
 
-const createMeasurementSchema = z.object({
+const baseMeasurementSchema = z.object({
   clientId: z.string().uuid(),
   date: z.string(), // YYYY-MM-DD
   time: z.string().max(10),
@@ -21,11 +21,56 @@ const createMeasurementSchema = z.object({
   status: z.enum(['scheduled', 'completed', 'cancelled']).optional(),
 });
 
-const updateMeasurementSchema = createMeasurementSchema.partial();
+const createMeasurementSchema = baseMeasurementSchema.superRefine((data, ctx) => {
+  const appointment = new Date(`${data.date}T${data.time}`);
+  if (Number.isNaN(appointment.getTime())) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Invalid measurement date or time',
+      path: ['date'],
+    });
+    return;
+  }
+
+  const now = new Date();
+  if (appointment.getTime() < now.getTime()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Measurement appointments cannot be scheduled in the past',
+      path: ['date'],
+    });
+  }
+});
+
+const updateMeasurementSchema = baseMeasurementSchema.partial().superRefine((data, ctx) => {
+  if (data.date && data.time) {
+    const appointment = new Date(`${data.date}T${data.time}`);
+    if (Number.isNaN(appointment.getTime())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Invalid measurement date or time',
+        path: ['date'],
+      });
+      return;
+    }
+
+    const now = new Date();
+    if (appointment.getTime() < now.getTime()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Measurement appointments cannot be scheduled in the past',
+        path: ['date'],
+      });
+    }
+  }
+});
 
 // GET /api/measurements
 router.get('/', async (_req: Request, res: Response) => {
-  const result = await db.select().from(measurements).orderBy(measurements.date);
+  const result = await db
+    .select()
+    .from(measurements)
+    .orderBy(measurements.date, measurements.time);
   res.json(result);
 });
 

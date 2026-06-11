@@ -2,11 +2,13 @@ import { Router } from 'express';
 import clientsRouter from './clients';
 import measurementsRouter from './measurements';
 import projectsRouter from './projects';
+import prequotationsRouter from './prequotations';
 
 const router = Router();
 
 router.use('/clients', clientsRouter);
 router.use('/measurements', measurementsRouter);
 router.use('/projects', projectsRouter);
+router.use('/prequotations', prequotationsRouter);
 
 export default router;
