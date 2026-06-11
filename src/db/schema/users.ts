@@ -9,9 +9,8 @@ import {
 
 export const userRoleEnum = pgEnum('user_role', [
   'admin',
-  'manager',
-  'operator',
-  'viewer',
+  'contractor',
+  'architect',
 ]);
 
 export const users = pgTable('users', {
@@ -19,7 +18,7 @@ export const users = pgTable('users', {
   name: varchar('name', { length: 255 }).notNull(),
   email: varchar('email', { length: 255 }).notNull().unique(),
   passwordHash: text('password_hash').notNull(),
-  role: userRoleEnum('role').notNull().default('viewer'),
+  role: userRoleEnum('role').notNull().default('admin'),
   avatar: text('avatar'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

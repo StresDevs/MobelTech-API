@@ -3,7 +3,7 @@ import { desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { validate } from '../middleware/validate';
 import { db } from '../db';
-import { prequotationLogs, prequotationVersions, prequotations } from '../db/schema';
+import { clients, prequotationLogs, prequotationVersions, prequotations } from '../db/schema';
 
 const router = Router();
 
@@ -91,7 +91,7 @@ router.get('/', async (_req: Request, res: Response) => {
 
 // GET /api/prequotations/:id
 router.get('/:id', async (req: Request, res: Response) => {
-  const prequotation = await hydratePrequotation(req.params.id);
+  const prequotation = await hydratePrequotation(req.params.id as string);
   if (!prequotation) {
     res.status(404).json({ error: 'Prequotation not found' });
     return;
@@ -101,43 +101,58 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 // POST /api/prequotations
 router.post('/', validate(createPrequotationSchema), async (req: Request, res: Response) => {
-  const { versions, logs, totalAmount, ...data } = req.body;
+  try {
+    const { versions, logs, totalAmount, clientId, ...data } = req.body;
 
-  const [created] = await db.insert(prequotations).values({
-    ...data,
-    totalAmount: totalAmount != null ? String(totalAmount) : null,
-  }).returning();
+    const [client] = await db.select({ id: clients.id }).from(clients).where(eq(clients.id, clientId));
+    if (!client) {
+      res.status(400).json({ error: 'Client not found for clientId' });
+      return;
+    }
 
-  await db.insert(prequotationVersions).values(
-    versions.map((version: any, index: number) => ({
-      prequotationId: created.id,
-      version: version.version ?? index + 1,
-      fileName: version.fileName,
-      fileType: version.fileType,
-      fileSize: version.fileSize,
-      uploadedBy: version.uploadedBy,
-      uploadedAt: version.uploadedAt ?? new Date(),
-      notes: version.notes ?? null,
-      fileUrl: version.fileUrl ?? null,
-      metadata: version.metadata ?? null,
-    })),
-  );
+    const [created] = await db.insert(prequotations).values({
+      clientId,
+      ...data,
+      totalAmount: totalAmount != null ? String(totalAmount) : null,
+    }).returning();
 
-  if (logs.length > 0) {
-    await db.insert(prequotationLogs).values(
-      logs.map((log: any) => ({
+    await db.insert(prequotationVersions).values(
+      versions.map((version: any, index: number) => ({
         prequotationId: created.id,
-        action: log.action,
-        performedBy: log.performedBy,
-        performedAt: log.performedAt ?? new Date(),
-        description: log.description,
-        metadata: log.metadata ?? null,
+        version: version.version ?? index + 1,
+        fileName: version.fileName,
+        fileType: version.fileType,
+        fileSize: version.fileSize,
+        uploadedBy: version.uploadedBy,
+        uploadedAt: version.uploadedAt ?? new Date(),
+        notes: version.notes ?? null,
+        fileUrl: version.fileUrl ?? null,
+        metadata: version.metadata ?? null,
       })),
     );
-  }
 
-  const hydrated = await hydratePrequotation(created.id);
-  res.status(201).json(hydrated);
+    if (logs.length > 0) {
+      await db.insert(prequotationLogs).values(
+        logs.map((log: any) => ({
+          prequotationId: created.id,
+          action: log.action,
+          performedBy: log.performedBy,
+          performedAt: log.performedAt ?? new Date(),
+          description: log.description,
+          metadata: log.metadata ?? null,
+        })),
+      );
+    }
+
+    const hydrated = await hydratePrequotation(created.id);
+    res.status(201).json(hydrated);
+  } catch (err) {
+    console.error('❌ Error creating prequotation:', err);
+    res.status(500).json({
+      error: 'Failed to create prequotation',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    });
+  }
 });
 
 // PUT /api/prequotations/:id
@@ -222,7 +237,7 @@ router.post('/:id/convert', async (req: Request, res: Response) => {
       convertedToQuotationId: quotationId,
       updatedAt: new Date(),
     })
-    .where(eq(prequotations.id, req.params.id))
+    .where(eq(prequotations.id, req.params.id as string))
     .returning();
 
   if (!updated) {
