@@ -14,8 +14,10 @@ const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
   console.error('❌ Invalid environment variables:', parsed.error.flatten().fieldErrors);
-  // Throwing (instead of process.exit) is safer for serverless: lets Vercel report a clean 500.
-  throw new Error('Invalid environment variables. Check your Vercel project / .env file.');
+  // Throwing (instead of process.exit) is safer for serverless and container deploys.
+  throw new Error(
+    'Invalid environment variables. Set DATABASE_URL, JWT_SECRET, and CORS_ORIGIN in your Railway/Vercel environment settings.',
+  );
 }
 
 export const env = parsed.data;
