@@ -3,7 +3,7 @@ import { desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { validate } from '../middleware/validate';
 import { db } from '../db';
-import { clients, prequotationLogs, prequotationVersions, prequotations, productionItems, productionItemPhases, productionOrders } from '../db/schema';
+import { clients, contractors, prequotationLogs, prequotationVersions, prequotations, productionItems, productionItemPhases, productionOrders, quotations, quotationItems } from '../db/schema';
 
 const router = Router();
 
@@ -221,45 +221,73 @@ router.put('/:id', validate(updatePrequotationSchema), async (req: Request, res:
 });
 
 router.post('/:id/confirm', async (req: Request, res: Response) => {
-  const id = req.params.id as string;
-  const { assignedContractorId, startDate, estimatedDeliveryDate } = req.body as {
+  try {
+    const id = req.params.id as string;
+    const { assignedContractorId, startDate, estimatedDeliveryDate } = req.body as {
     assignedContractorId?: string;
     startDate?: string;
     estimatedDeliveryDate?: string;
-  };
+    };
 
-  const [prequotation] = await db.select().from(prequotations).where(eq(prequotations.id, id));
-  if (!prequotation) {
-    res.status(404).json({ error: 'Prequotation not found' });
-    return;
-  }
+    const [prequotation] = await db.select().from(prequotations).where(eq(prequotations.id, id));
+    if (!prequotation) {
+      res.status(404).json({ error: 'Prequotation not found' });
+      return;
+    }
 
-  const [updated] = await db.update(prequotations).set({
-    status: 'confirmed',
-    assignedContractorId: assignedContractorId ?? prequotation.assignedContractorId ?? null,
-    startDate: startDate ?? prequotation.startDate ?? null,
-    estimatedDeliveryDate: estimatedDeliveryDate ?? prequotation.estimatedDeliveryDate ?? null,
-    updatedAt: new Date(),
-  }).where(eq(prequotations.id, id)).returning();
+    const contractorId = assignedContractorId ?? prequotation.assignedContractorId ?? null;
+    const effectiveStartDate = startDate ?? (prequotation.startDate ? String(prequotation.startDate) : null);
+    const effectiveEstimatedDeliveryDate = estimatedDeliveryDate ?? (prequotation.estimatedDeliveryDate ? String(prequotation.estimatedDeliveryDate) : null);
 
-  if (!updated) {
-    res.status(404).json({ error: 'Prequotation not found' });
-    return;
-  }
+    if (!contractorId) {
+      res.status(400).json({ error: 'assignedContractorId is required to confirm' });
+      return;
+    }
+    const [contractorRow] = await db.select({ id: contractors.id }).from(contractors).where(eq(contractors.id, contractorId));
+    if (!contractorRow) {
+      res.status(400).json({ error: 'assignedContractorId not found in contractors table' });
+      return;
+    }
+    if (!effectiveStartDate || !effectiveEstimatedDeliveryDate) {
+      res.status(400).json({ error: 'startDate and estimatedDeliveryDate are required to confirm' });
+      return;
+    }
 
-  const quotationId = prequotation.convertedToQuotationId ?? `quot-${Date.now()}`;
-  await db.update(prequotations).set({ convertedToQuotationId: quotationId }).where(eq(prequotations.id, id));
-
-  if (updated.assignedContractorId) {
-    const [productionOrder] = await db.insert(productionOrders).values({
-      projectId: null,
-      quotationId,
-      assignedContractorId: updated.assignedContractorId,
-      status: 'pending',
-      startDate: String(updated.startDate ?? new Date().toISOString().slice(0, 10)),
-      estimatedDeliveryDate: String(updated.estimatedDeliveryDate ?? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)),
+    const [updatedQuotation] = await db.insert(quotations).values({
+      clientId: prequotation.clientId,
+      status: 'draft',
+      totalAmount: prequotation.totalAmount != null ? String(prequotation.totalAmount) : '0',
+      notes: prequotation.notes ?? null,
     }).returning();
 
+    await db.insert(quotationItems).values({
+      quotationId: updatedQuotation.id,
+      description: prequotation.title,
+      quantity: 1,
+      unitPrice: prequotation.totalAmount != null ? String(prequotation.totalAmount) : '0',
+      dimensions: null,
+      notes: prequotation.notes ?? null,
+    });
+
+    const [updated] = await db.update(prequotations).set({
+      status: 'confirmed',
+      assignedContractorId: contractorId,
+      startDate: effectiveStartDate,
+      estimatedDeliveryDate: effectiveEstimatedDeliveryDate,
+      convertedToQuotationId: updatedQuotation.id,
+      updatedAt: new Date(),
+    }).where(eq(prequotations.id, id)).returning();
+
+    const [productionOrder] = await db.insert(productionOrders).values({
+      projectId: null,
+      quotationId: updatedQuotation.id,
+      assignedContractorId: contractorId,
+      status: 'pending',
+      startDate: effectiveStartDate,
+      estimatedDeliveryDate: effectiveEstimatedDeliveryDate,
+    }).returning();
+
+    if (productionOrder) {
     const [productionItem] = await db.insert(productionItems).values({
       productionOrderId: productionOrder.id,
       description: prequotation.title,
@@ -274,9 +302,13 @@ router.post('/:id/confirm', async (req: Request, res: Response) => {
       { productionItemId: productionItem.id, phase: 'instalacion', completed: 'false' },
       { productionItemId: productionItem.id, phase: 'entregado', completed: 'false' },
     ]);
-  }
+    }
 
-  res.json(await hydratePrequotation(id));
+    res.json(await hydratePrequotation(id));
+  } catch (err) {
+    console.error('❌ Error confirming prequotation:', err);
+    res.status(500).json({ error: 'Failed to confirm prequotation', message: err instanceof Error ? err.message : 'Unknown error' });
+  }
 });
 
 // DELETE /api/prequotations/:id
