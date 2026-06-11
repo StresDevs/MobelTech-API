@@ -18,6 +18,7 @@ export const contractors = pgTable('contractors', {
   name: varchar('name', { length: 255 }).notNull(),
   phone: varchar('phone', { length: 50 }).notNull(),
   email: varchar('email', { length: 255 }),
+  userId: uuid('user_id'),
   specialization: varchar('specialization', { length: 255 }),
   status: contractorStatusEnum('status').notNull().default('active'),
   advance1: numeric('advance1', { precision: 12, scale: 2 }).default('0'),

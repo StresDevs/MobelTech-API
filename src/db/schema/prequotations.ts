@@ -4,6 +4,7 @@ import {
   varchar,
   text,
   timestamp,
+  date,
   boolean,
   numeric,
   integer,
@@ -13,6 +14,7 @@ import {
 import { clients } from './clients';
 import { measurements } from './measurements';
 import { quotations } from './quotations';
+import { contractors } from './contractors';
 
 export const prequotationStatusEnum = pgEnum('prequotation_status', [
   'draft',
@@ -41,6 +43,9 @@ export const prequotations = pgTable('prequotations', {
   status: prequotationStatusEnum('status').notNull().default('draft'),
   currentVersion: integer('current_version').notNull().default(1),
   createdBy: varchar('created_by', { length: 255 }).notNull(),
+  assignedContractorId: uuid('assigned_contractor_id').references(() => contractors.id, { onDelete: 'set null' }),
+  startDate: date('start_date'),
+  estimatedDeliveryDate: date('estimated_delivery_date'),
   notes: text('notes'),
   convertedToQuotationId: uuid('converted_to_quotation_id').references(() => quotations.id, { onDelete: 'set null' }),
   billingRequested: boolean('billing_requested').notNull().default(false),

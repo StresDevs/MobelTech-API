@@ -30,9 +30,7 @@ export const productionPhaseEnum = pgEnum('production_phase', [
 
 export const productionOrders = pgTable('production_orders', {
   id: uuid('id').primaryKey().defaultRandom(),
-  projectId: uuid('project_id')
-    .notNull()
-    .references(() => projects.id),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
   quotationId: uuid('quotation_id').references(() => quotations.id),
   assignedContractorId: uuid('assigned_contractor_id').references(
     () => contractors.id,
