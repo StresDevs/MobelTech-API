@@ -11,6 +11,7 @@ import prequotationsRouter from './prequotations';
 import preferencesRouter from './preferences';
 import quotationsRouter from './quotations';
 import notificationsRouter from './notifications';
+import inventoryRouter from './inventory';
 
 const router = Router();
 
@@ -26,5 +27,6 @@ router.use('/prequotations', prequotationsRouter);
 router.use('/quotations', quotationsRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/preferences', preferencesRouter);
+router.use('/inventory', inventoryRouter);
 
 export default router;

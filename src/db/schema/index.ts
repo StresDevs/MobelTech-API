@@ -14,7 +14,23 @@ export {
   prequotationLogActionEnum,
 } from './prequotations';
 export { contractors, contractorStatusEnum } from './contractors';
-export { suppliers, materials, supplierStatusEnum } from './inventory';
+export {
+  warehouses,
+  suppliers,
+  materials,
+  materialPriceHistory,
+  materialUsageLogs,
+  purchaseOrders,
+  purchaseOrderItems,
+  inventoryDefectAlerts,
+  inventoryReturnClaims,
+  inventorySurplus,
+  supplierStatusEnum,
+  purchaseOrderStatusEnum,
+  inventoryDefectStatusEnum,
+  inventoryClaimStatusEnum,
+  inventorySurplusClassEnum,
+} from './inventory';
 export {
   materialRequests,
   materialRequestItems,

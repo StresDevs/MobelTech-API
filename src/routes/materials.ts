@@ -15,6 +15,8 @@ router.get('/', async (req, res) => {
       query
         ? or(
             ilike(materials.name, `%${query}%`),
+            ilike(materials.sku, `%${query}%`),
+            ilike(materials.category, `%${query}%`),
             ilike(materials.unit, `%${query}%`),
           )
         : undefined,
@@ -25,7 +27,7 @@ router.get('/', async (req, res) => {
     rows.map((row) => ({
       ...row,
       unitPrice: Number(row.unitPrice ?? 0),
-      stock: Number(row.stock ?? 0),
+      stock: Number(row.stockPhysical ?? row.stock ?? 0),
     })),
   );
 });
