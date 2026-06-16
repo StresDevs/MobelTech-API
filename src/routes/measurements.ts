@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db';
-import { measurements } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { measurements, prequotations } from '../db/schema';
+import { desc, eq } from 'drizzle-orm';
 import { validate } from '../middleware/validate';
 import { z } from 'zod';
 
@@ -65,13 +65,50 @@ const updateMeasurementSchema = baseMeasurementSchema.partial().superRefine((dat
   }
 });
 
+async function getLinkedPrequotationsByMeasurementId(measurementIds: string[]) {
+  if (measurementIds.length === 0) return new Map<string, { id: string; title: string; status: string }>();
+
+  const rows = await db
+    .select({
+      id: prequotations.id,
+      title: prequotations.title,
+      status: prequotations.status,
+      measurementId: prequotations.measurementId,
+      updatedAt: prequotations.updatedAt,
+    })
+    .from(prequotations)
+    .orderBy(desc(prequotations.updatedAt));
+
+  const linked = new Map<string, { id: string; title: string; status: string }>();
+  rows.forEach((prequotation) => {
+    if (!prequotation.measurementId || !measurementIds.includes(prequotation.measurementId)) return;
+    if (linked.has(prequotation.measurementId)) return;
+
+    linked.set(prequotation.measurementId, {
+      id: prequotation.id,
+      title: prequotation.title,
+      status: prequotation.status,
+    });
+  });
+
+  return linked;
+}
+
+async function hydrateMeasurementLinks<T extends { id: string }>(rows: T[]) {
+  const linkedByMeasurementId = await getLinkedPrequotationsByMeasurementId(rows.map((row) => row.id));
+  return rows.map((measurement) => ({
+    ...measurement,
+    linkedPrequotation: linkedByMeasurementId.get(measurement.id) ?? null,
+  }));
+}
+
 // GET /api/measurements
 router.get('/', async (_req: Request, res: Response) => {
   const result = await db
     .select()
     .from(measurements)
     .orderBy(measurements.date, measurements.time);
-  res.json(result);
+  res.json(await hydrateMeasurementLinks(result));
 });
 
 // GET /api/measurements/:id
@@ -85,7 +122,8 @@ router.get('/:id', async (req: Request, res: Response) => {
     res.status(404).json({ error: 'Measurement not found' });
     return;
   }
-  res.json(measurement);
+  const [hydrated] = await hydrateMeasurementLinks([measurement]);
+  res.json(hydrated);
 });
 
 // POST /api/measurements

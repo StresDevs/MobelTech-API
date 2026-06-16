@@ -28,6 +28,11 @@ export const productionPhaseEnum = pgEnum('production_phase', [
   'entregado',
 ]);
 
+export const productionScheduleTypeEnum = pgEnum('production_schedule_type', [
+  'tentative',
+  'actual',
+]);
+
 export const productionOrders = pgTable('production_orders', {
   id: uuid('id').primaryKey().defaultRandom(),
   projectId: uuid('project_id').references(() => projects.id, { onDelete: 'set null' }),
@@ -62,4 +67,18 @@ export const productionItemPhases = pgTable('production_item_phases', {
   phase: productionPhaseEnum('phase').notNull(),
   completed: varchar('completed', { length: 5 }).notNull().default('false'),
   completedDate: timestamp('completed_date', { withTimezone: true }),
+});
+
+export const productionSchedulePhases = pgTable('production_schedule_phases', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  productionOrderId: uuid('production_order_id')
+    .notNull()
+    .references(() => productionOrders.id, { onDelete: 'cascade' }),
+  type: productionScheduleTypeEnum('type').notNull(),
+  phase: productionPhaseEnum('phase').notNull(),
+  startDate: date('start_date').notNull(),
+  endDate: date('end_date').notNull(),
+  createdBy: uuid('created_by'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

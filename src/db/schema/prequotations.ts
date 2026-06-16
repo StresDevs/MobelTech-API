@@ -50,6 +50,7 @@ export const prequotations = pgTable('prequotations', {
   convertedToQuotationId: uuid('converted_to_quotation_id').references(() => quotations.id, { onDelete: 'set null' }),
   billingRequested: boolean('billing_requested').notNull().default(false),
   totalAmount: numeric('total_amount', { precision: 12, scale: 2 }),
+  advanceAmount: numeric('advance_amount', { precision: 12, scale: 2 }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

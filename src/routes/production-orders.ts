@@ -1,15 +1,34 @@
 import { Router } from 'express';
-import { desc, eq } from 'drizzle-orm';
+import { randomUUID } from 'crypto';
+import { and, desc, eq } from 'drizzle-orm';
+import { z } from 'zod';
 import { db } from '../db';
-import { productionItems, productionItemPhases, productionOrders } from '../db/schema';
+import { productionItems, productionItemPhases, productionOrders, productionSchedulePhases } from '../db/schema';
+import { validate } from '../middleware/validate';
 
 const router = Router();
 
-async function hydrateProductionOrder(orderId: string) {
-  const [order] = await db.select().from(productionOrders).where(eq(productionOrders.id, orderId));
-  if (!order) return null;
+const schedulePhaseSchema = z.object({
+  phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
+  startDate: z.string().min(1),
+  endDate: z.string().min(1),
+});
 
-  const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, orderId));
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const updateScheduleSchema = z.object({
+  type: z.enum(['tentative', 'actual']),
+  createdBy: z.string().optional().nullable(),
+  phases: z.array(schedulePhaseSchema).length(5),
+});
+
+async function hydrateProductionOrder(order: typeof productionOrders.$inferSelect) {
+  const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, order.id));
+  const schedulePhases = await db
+    .select()
+    .from(productionSchedulePhases)
+    .where(eq(productionSchedulePhases.productionOrderId, order.id));
+
   const hydratedItems = await Promise.all(
     items.map(async (item) => {
       const phases = await db
@@ -20,24 +39,60 @@ async function hydrateProductionOrder(orderId: string) {
     }),
   );
 
-  return { ...order, items: hydratedItems };
+  return { ...order, items: hydratedItems, schedulePhases };
 }
 
 router.get('/', async (req, res) => {
   const contractorId = req.query.contractorId as string | undefined;
   const rows = await db.select().from(productionOrders).orderBy(desc(productionOrders.createdAt));
   const filtered = contractorId ? rows.filter((r) => r.assignedContractorId === contractorId) : rows;
-  const hydrated = await Promise.all(filtered.map((row) => hydrateProductionOrder(row.id)));
+  const hydrated = await Promise.all(filtered.map((row) => hydrateProductionOrder(row)));
   res.json(hydrated.filter(Boolean));
 });
 
 router.get('/:id', async (req, res) => {
-  const order = await hydrateProductionOrder(req.params.id as string);
+  const [row] = await db.select().from(productionOrders).where(eq(productionOrders.id, req.params.id as string));
+  if (!row) {
+    res.status(404).json({ error: 'Production order not found' });
+    return;
+  }
+  const order = await hydrateProductionOrder(row);
+  res.json(order);
+});
+
+router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => {
+  const orderId = req.params.id as string;
+  const { type, phases, createdBy } = req.body;
+  const normalizedCreatedBy = createdBy && UUID_REGEX.test(createdBy) ? createdBy : null;
+
+  const [order] = await db.select().from(productionOrders).where(eq(productionOrders.id, orderId));
   if (!order) {
     res.status(404).json({ error: 'Production order not found' });
     return;
   }
-  res.json(order);
+
+  await db
+    .delete(productionSchedulePhases)
+    .where(and(
+      eq(productionSchedulePhases.productionOrderId, orderId),
+      eq(productionSchedulePhases.type, type),
+    ));
+
+  await db.insert(productionSchedulePhases).values(
+    phases.map((phase: z.infer<typeof schedulePhaseSchema>) => ({
+      id: randomUUID(),
+      productionOrderId: orderId,
+      type,
+      phase: phase.phase,
+      startDate: phase.startDate,
+      endDate: phase.endDate,
+      createdBy: normalizedCreatedBy,
+      updatedAt: new Date(),
+    })),
+  );
+
+  const hydrated = await hydrateProductionOrder(order);
+  res.json(hydrated);
 });
 
 export default router;

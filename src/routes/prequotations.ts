@@ -1,9 +1,10 @@
 import { Router, Request, Response } from 'express';
-import { desc, eq } from 'drizzle-orm';
+import { randomUUID } from 'crypto';
+import { and, desc, eq, ilike, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { validate } from '../middleware/validate';
 import { db } from '../db';
-import { clients, contractors, prequotationLogs, prequotationVersions, prequotations, productionItems, productionItemPhases, productionOrders, quotations, quotationItems } from '../db/schema';
+import { clients, contractors, measurements, notifications, prequotationLogs, prequotationVersions, prequotations, productionItems, productionItemPhases, productionOrders, quotations, quotationItems, users } from '../db/schema';
 
 const router = Router();
 
@@ -49,6 +50,7 @@ const createPrequotationSchema = z.object({
   convertedToQuotationId: z.string().uuid().optional().nullable(),
   billingRequested: z.boolean().optional(),
   totalAmount: z.union([z.number(), z.string()]).optional().nullable(),
+  advanceAmount: z.union([z.number(), z.string()]).optional().nullable(),
 });
 
 const updatePrequotationSchema = createPrequotationSchema.partial().extend({
@@ -56,20 +58,30 @@ const updatePrequotationSchema = createPrequotationSchema.partial().extend({
   logs: z.array(prequotationLogSchema).optional(),
 });
 
+const prequotationListQuerySchema = z.object({
+  search: z.string().optional().default(''),
+  status: z.enum(['all', 'draft', 'in-review', 'adjustment', 'confirmed', 'rejected']).optional().default('all'),
+  billingRequested: z.enum(['all', 'true']).optional().default('all'),
+});
+
 async function hydratePrequotation(prequotationId: string) {
   const [prequotation] = await db.select().from(prequotations).where(eq(prequotations.id, prequotationId));
   if (!prequotation) return null;
 
+  return hydratePrequotationRow(prequotation);
+}
+
+async function hydratePrequotationRow(prequotation: typeof prequotations.$inferSelect) {
   const versions = await db
     .select()
     .from(prequotationVersions)
-    .where(eq(prequotationVersions.prequotationId, prequotationId))
+    .where(eq(prequotationVersions.prequotationId, prequotation.id))
     .orderBy(desc(prequotationVersions.version));
 
   const logs = await db
     .select()
     .from(prequotationLogs)
-    .where(eq(prequotationLogs.prequotationId, prequotationId))
+    .where(eq(prequotationLogs.prequotationId, prequotation.id))
     .orderBy(desc(prequotationLogs.performedAt));
 
   return {
@@ -85,11 +97,90 @@ async function hydratePrequotation(prequotationId: string) {
   };
 }
 
+function summarizePrequotation(prequotation: typeof prequotations.$inferSelect) {
+  return {
+    ...prequotation,
+    versions: [],
+    logs: [],
+  };
+}
+
+async function validateMeasurementAnchor({
+  clientId,
+  measurementId,
+  prequotationId,
+}: {
+  clientId?: string;
+  measurementId?: string | null;
+  prequotationId?: string;
+}) {
+  if (!measurementId) return null;
+
+  const [measurement] = await db
+    .select({ id: measurements.id, clientId: measurements.clientId })
+    .from(measurements)
+    .where(eq(measurements.id, measurementId));
+
+  if (!measurement) return 'Measurement not found for measurementId';
+  if (clientId && measurement.clientId !== clientId) return 'Measurement does not belong to the selected client';
+
+  const existingRows = await db
+    .select({ id: prequotations.id })
+    .from(prequotations)
+    .where(eq(prequotations.measurementId, measurementId));
+
+  const existing = existingRows.find((row) => row.id !== prequotationId);
+  if (existing) return 'Measurement already has a linked prequotation';
+
+  return null;
+}
+
 // GET /api/prequotations
-router.get('/', async (_req: Request, res: Response) => {
-  const rows = await db.select().from(prequotations).orderBy(desc(prequotations.updatedAt));
-  const hydrated = await Promise.all(rows.map((row) => hydratePrequotation(row.id)));
-  res.json(hydrated.filter(Boolean));
+router.get('/', async (req: Request, res: Response) => {
+  const parsed = prequotationListQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid prequotation filters', details: parsed.error.flatten().fieldErrors });
+    return;
+  }
+
+  const search = parsed.data.search.trim();
+  const filters = [
+    parsed.data.status === 'all' ? undefined : eq(prequotations.status, parsed.data.status),
+    parsed.data.billingRequested === 'true' ? eq(prequotations.billingRequested, true) : undefined,
+    search
+      ? or(
+          ilike(prequotations.title, `%${search}%`),
+          ilike(clients.name, `%${search}%`),
+        )
+      : undefined,
+  ].filter(Boolean);
+
+  const rows = await db
+    .select({
+      id: prequotations.id,
+      clientId: prequotations.clientId,
+      measurementId: prequotations.measurementId,
+      title: prequotations.title,
+      status: prequotations.status,
+      currentVersion: prequotations.currentVersion,
+      createdBy: prequotations.createdBy,
+      assignedContractorId: prequotations.assignedContractorId,
+      startDate: prequotations.startDate,
+      estimatedDeliveryDate: prequotations.estimatedDeliveryDate,
+      notes: prequotations.notes,
+      convertedToQuotationId: prequotations.convertedToQuotationId,
+      billingRequested: prequotations.billingRequested,
+      totalAmount: prequotations.totalAmount,
+      advanceAmount: prequotations.advanceAmount,
+      createdAt: prequotations.createdAt,
+      updatedAt: prequotations.updatedAt,
+    })
+    .from(prequotations)
+    .leftJoin(clients, eq(prequotations.clientId, clients.id))
+    .where(filters.length > 0 ? and(...filters) : undefined)
+    .orderBy(desc(prequotations.updatedAt));
+
+  res.json(rows.map(summarizePrequotation));
 });
 
 // GET /api/prequotations/:id
@@ -105,7 +196,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 // POST /api/prequotations
 router.post('/', validate(createPrequotationSchema), async (req: Request, res: Response) => {
   try {
-    const { versions, logs, totalAmount, clientId, assignedContractorId, startDate, estimatedDeliveryDate, ...data } = req.body;
+    const { versions, logs, totalAmount, advanceAmount, clientId, measurementId, assignedContractorId, startDate, estimatedDeliveryDate, ...data } = req.body;
 
     const [client] = await db.select({ id: clients.id }).from(clients).where(eq(clients.id, clientId));
     if (!client) {
@@ -113,13 +204,21 @@ router.post('/', validate(createPrequotationSchema), async (req: Request, res: R
       return;
     }
 
+    const measurementError = await validateMeasurementAnchor({ clientId, measurementId });
+    if (measurementError) {
+      res.status(400).json({ error: measurementError });
+      return;
+    }
+
     const [created] = await db.insert(prequotations).values({
       clientId,
+      measurementId: measurementId ?? null,
       assignedContractorId: assignedContractorId ?? null,
       startDate: startDate ?? null,
       estimatedDeliveryDate: estimatedDeliveryDate ?? null,
       ...data,
       totalAmount: totalAmount != null ? String(totalAmount) : null,
+      advanceAmount: advanceAmount != null ? String(advanceAmount) : null,
     }).returning();
 
     await db.insert(prequotationVersions).values(
@@ -164,25 +263,44 @@ router.post('/', validate(createPrequotationSchema), async (req: Request, res: R
 // PUT /api/prequotations/:id
 router.put('/:id', validate(updatePrequotationSchema), async (req: Request, res: Response) => {
   const id = req.params.id as string;
-  const { versions, logs, totalAmount, assignedContractorId, startDate, estimatedDeliveryDate, ...data } = req.body;
+  const { versions, logs, totalAmount, advanceAmount, clientId, measurementId, assignedContractorId, startDate, estimatedDeliveryDate, ...data } = req.body;
+
+  const [current] = await db.select().from(prequotations).where(eq(prequotations.id, id));
+  if (!current) {
+    res.status(404).json({ error: 'Prequotation not found' });
+    return;
+  }
+
+  const nextClientId = clientId ?? current.clientId;
+  const nextMeasurementId = Object.prototype.hasOwnProperty.call(req.body, 'measurementId')
+    ? measurementId
+    : current.measurementId;
+
+  const measurementError = await validateMeasurementAnchor({
+    clientId: nextClientId,
+    measurementId: nextMeasurementId,
+    prequotationId: id,
+  });
+  if (measurementError) {
+    res.status(400).json({ error: measurementError });
+    return;
+  }
 
   const [updated] = await db
     .update(prequotations)
     .set({
       ...data,
+      ...(clientId !== undefined ? { clientId } : {}),
+      ...(Object.prototype.hasOwnProperty.call(req.body, 'measurementId') ? { measurementId: measurementId ?? null } : {}),
       assignedContractorId: assignedContractorId ?? undefined,
       startDate: startDate ?? undefined,
       estimatedDeliveryDate: estimatedDeliveryDate ?? undefined,
       ...(totalAmount != null ? { totalAmount: String(totalAmount) } : {}),
+      ...(advanceAmount != null ? { advanceAmount: String(advanceAmount) } : {}),
       updatedAt: new Date(),
     })
     .where(eq(prequotations.id, id))
     .returning();
-
-  if (!updated) {
-    res.status(404).json({ error: 'Prequotation not found' });
-    return;
-  }
 
   if (Array.isArray(versions)) {
     await db.delete(prequotationVersions).where(eq(prequotationVersions.prequotationId, id));
@@ -223,10 +341,11 @@ router.put('/:id', validate(updatePrequotationSchema), async (req: Request, res:
 router.post('/:id/confirm', async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { assignedContractorId, startDate, estimatedDeliveryDate } = req.body as {
+    const { assignedContractorId, startDate, estimatedDeliveryDate, advanceAmount } = req.body as {
     assignedContractorId?: string;
     startDate?: string;
     estimatedDeliveryDate?: string;
+    advanceAmount?: string | number;
     };
 
     const [prequotation] = await db.select().from(prequotations).where(eq(prequotations.id, id));
@@ -235,28 +354,41 @@ router.post('/:id/confirm', async (req: Request, res: Response) => {
       return;
     }
 
+    const parsedAdvanceAmount = Number(
+      advanceAmount ?? prequotation.advanceAmount ?? 0,
+    );
+    if (!Number.isFinite(parsedAdvanceAmount) || parsedAdvanceAmount <= 0) {
+      res.status(400).json({ error: 'advanceAmount is required to confirm and must be greater than zero' });
+      return;
+    }
+
     const contractorId = assignedContractorId ?? prequotation.assignedContractorId ?? null;
     const effectiveStartDate = startDate ?? (prequotation.startDate ? String(prequotation.startDate) : null);
     const effectiveEstimatedDeliveryDate = estimatedDeliveryDate ?? (prequotation.estimatedDeliveryDate ? String(prequotation.estimatedDeliveryDate) : null);
 
-    if (!contractorId) {
-      res.status(400).json({ error: 'assignedContractorId is required to confirm' });
-      return;
-    }
-    const [contractorRow] = await db.select({ id: contractors.id }).from(contractors).where(eq(contractors.id, contractorId));
-    if (!contractorRow) {
+    const [contractorRow] = contractorId
+      ? await db.select({
+          id: contractors.id,
+          name: contractors.name,
+          userId: contractors.userId,
+        }).from(contractors).where(eq(contractors.id, contractorId))
+      : [null];
+    if (contractorId && !contractorRow) {
       res.status(400).json({ error: 'assignedContractorId not found in contractors table' });
       return;
     }
-    if (!effectiveStartDate || !effectiveEstimatedDeliveryDate) {
-      res.status(400).json({ error: 'startDate and estimatedDeliveryDate are required to confirm' });
-      return;
-    }
+
+    const provisionedCredentials = contractorRow && !contractorRow.userId
+      ? await ensureContractorAccess(contractorRow.id, contractorRow.name)
+      : null;
+
+    const recipientUserId = contractorRow?.userId ?? provisionedCredentials?.userId ?? null;
 
     const [updatedQuotation] = await db.insert(quotations).values({
       clientId: prequotation.clientId,
       status: 'draft',
       totalAmount: prequotation.totalAmount != null ? String(prequotation.totalAmount) : '0',
+      advanceAmount: String(parsedAdvanceAmount),
       notes: prequotation.notes ?? null,
     }).returning();
 
@@ -271,40 +403,62 @@ router.post('/:id/confirm', async (req: Request, res: Response) => {
 
     const [updated] = await db.update(prequotations).set({
       status: 'confirmed',
-      assignedContractorId: contractorId,
-      startDate: effectiveStartDate,
-      estimatedDeliveryDate: effectiveEstimatedDeliveryDate,
+      assignedContractorId: contractorId ?? prequotation.assignedContractorId ?? null,
+      startDate: effectiveStartDate ?? prequotation.startDate ?? null,
+      estimatedDeliveryDate: effectiveEstimatedDeliveryDate ?? prequotation.estimatedDeliveryDate ?? null,
+      advanceAmount: String(parsedAdvanceAmount),
       convertedToQuotationId: updatedQuotation.id,
       updatedAt: new Date(),
     }).where(eq(prequotations.id, id)).returning();
 
-    const [productionOrder] = await db.insert(productionOrders).values({
-      projectId: null,
-      quotationId: updatedQuotation.id,
-      assignedContractorId: contractorId,
-      status: 'pending',
-      startDate: effectiveStartDate,
-      estimatedDeliveryDate: effectiveEstimatedDeliveryDate,
-    }).returning();
+    const shouldCreateProductionOrder = Boolean(contractorId && effectiveStartDate && effectiveEstimatedDeliveryDate);
+    const [productionOrder] = shouldCreateProductionOrder
+      ? await db.insert(productionOrders).values({
+          projectId: null,
+          quotationId: updatedQuotation.id,
+          assignedContractorId: contractorId,
+          status: 'pending',
+          startDate: effectiveStartDate as string,
+          estimatedDeliveryDate: effectiveEstimatedDeliveryDate as string,
+        }).returning()
+      : [null];
 
     if (productionOrder) {
-    const [productionItem] = await db.insert(productionItems).values({
-      productionOrderId: productionOrder.id,
-      description: prequotation.title,
-      quantity: 1,
-      progress: 0,
-    }).returning();
+      const [productionItem] = await db.insert(productionItems).values({
+        productionOrderId: productionOrder.id,
+        description: prequotation.title,
+        quantity: 1,
+        progress: 0,
+      }).returning();
 
-    await db.insert(productionItemPhases).values([
-      { productionItemId: productionItem.id, phase: 'cortado', completed: 'false' },
-      { productionItemId: productionItem.id, phase: 'canteado', completed: 'false' },
-      { productionItemId: productionItem.id, phase: 'ensamblado', completed: 'false' },
-      { productionItemId: productionItem.id, phase: 'instalacion', completed: 'false' },
-      { productionItemId: productionItem.id, phase: 'entregado', completed: 'false' },
-    ]);
+      await db.insert(productionItemPhases).values([
+        { productionItemId: productionItem.id, phase: 'cortado', completed: 'false' },
+        { productionItemId: productionItem.id, phase: 'canteado', completed: 'false' },
+        { productionItemId: productionItem.id, phase: 'ensamblado', completed: 'false' },
+        { productionItemId: productionItem.id, phase: 'instalacion', completed: 'false' },
+        { productionItemId: productionItem.id, phase: 'entregado', completed: 'false' },
+      ]);
     }
 
-    res.json(await hydratePrequotation(id));
+    if (recipientUserId && productionOrder) {
+      await db.insert(notifications).values({
+        id: randomUUID(),
+        recipientUserId,
+        message: `Tienes un trabajo asignado: ${prequotation.title}`,
+        relatedJobId: productionOrder.id,
+      });
+    }
+
+    res.json({
+      prequotation: await hydratePrequotation(id),
+      contractorCredentials: provisionedCredentials
+        ? {
+            username: provisionedCredentials.username,
+            password: provisionedCredentials.password,
+          }
+        : null,
+      productionOrderId: productionOrder?.id ?? null,
+    });
   } catch (err) {
     console.error('❌ Error confirming prequotation:', err);
     res.status(500).json({ error: 'Failed to confirm prequotation', message: err instanceof Error ? err.message : 'Unknown error' });
@@ -349,3 +503,62 @@ router.post('/:id/convert', async (req: Request, res: Response) => {
 });
 
 export default router;
+
+function slugifyUsername(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '')
+    .slice(0, 24) || 'contratista';
+}
+
+function generatePassword() {
+  return `mt${Math.random().toString(36).slice(2, 6)}${Date.now().toString().slice(-4)}`;
+}
+
+async function generateAvailableUsername(baseValue: string) {
+  const base = slugifyUsername(baseValue);
+  let candidate = base;
+  let suffix = 1;
+
+  while (true) {
+    const [existing] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, `${candidate}@mobeltech.local`));
+
+    if (!existing) return candidate;
+    suffix += 1;
+    candidate = `${base}.${suffix}`;
+  }
+}
+
+async function ensureContractorAccess(contractorId: string, contractorName: string) {
+  const username = await generateAvailableUsername(contractorName);
+  const password = generatePassword();
+  const email = `${username}@mobeltech.local`;
+
+  const [user] = await db.insert(users).values({
+    id: randomUUID(),
+    name: contractorName,
+    email,
+    passwordHash: password,
+    role: 'contractor',
+  }).returning();
+
+  await db
+    .update(contractors)
+    .set({
+      userId: user.id,
+      updatedAt: new Date(),
+    })
+    .where(eq(contractors.id, contractorId));
+
+  return {
+    userId: user.id,
+    username,
+    password,
+  };
+}

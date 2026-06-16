@@ -8,7 +8,8 @@ import { createToken, getTokenFromRequestCookie, serializeAuthCookie, verifyToke
 const router = Router();
 
 const loginSchema = z.object({
-  email: z.string().email(),
+  identifier: z.string().min(1).optional(),
+  email: z.string().min(1).optional(),
   password: z.string().min(1),
 });
 
@@ -19,10 +20,15 @@ router.post('/login', async (req, res) => {
     return;
   }
 
-  const { email, password } = parsed.data;
-  const [user] = await db.select().from(users).where(eq(users.email, email.toLowerCase().trim()));
+  const password = parsed.data.password;
+  const rawIdentifier = (parsed.data.identifier ?? parsed.data.email ?? '').toLowerCase().trim();
+  const normalizedEmail = rawIdentifier.includes('@')
+    ? rawIdentifier
+    : `${rawIdentifier}@mobeltech.local`;
+
+  const [user] = await db.select().from(users).where(eq(users.email, normalizedEmail));
   if (!user || user.passwordHash !== password) {
-    res.status(401).json({ error: 'Invalid email or password' });
+    res.status(401).json({ error: 'Invalid username/email or password' });
     return;
   }
 

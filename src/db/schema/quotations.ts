@@ -26,6 +26,7 @@ export const quotations = pgTable('quotations', {
   projectId: uuid('project_id').references(() => projects.id),
   status: quotationStatusEnum('status').notNull().default('draft'),
   totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+  advanceAmount: numeric('advance_amount', { precision: 12, scale: 2 }).notNull().default('0'),
   notes: text('notes'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
