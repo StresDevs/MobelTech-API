@@ -35,13 +35,47 @@ const updateQuotationSchema = z.object({
   items: z.array(quotationItemSchema).optional(),
 });
 
+const optionalNullableTextSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}, z.string().optional().nullable());
+
+const numericInputSchema = z.preprocess((value) => {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().replace(',', '.');
+    if (!normalized) return Number.NaN;
+    return Number(normalized);
+  }
+  return value;
+}, z.number().finite().min(0));
+
+const dateInputSchema = z.preprocess((value) => {
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  return value;
+}, z.string().min(1).refine((value) => !Number.isNaN(new Date(value).getTime()), {
+  message: 'Invalid date',
+}));
+
+const nullableUuidSchema = z.preprocess((value) => {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}, z.string().uuid().optional().nullable());
+
 const quotationEnvironmentSchema = z.object({
   ambience: z.string().min(1).max(160),
-  description: z.string().optional().nullable(),
-  price: z.union([z.number(), z.string()]),
-  estimatedStartDate: z.string().min(1),
-  estimatedEndDate: z.string().min(1),
-  assignedContractorId: z.string().uuid().optional().nullable(),
+  description: optionalNullableTextSchema,
+  price: numericInputSchema,
+  estimatedStartDate: dateInputSchema,
+  estimatedEndDate: dateInputSchema,
+  assignedContractorId: nullableUuidSchema,
 });
 
 const createQuotationEnvironmentProjectsSchema = z.object({
