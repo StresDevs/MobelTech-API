@@ -38,11 +38,20 @@ const updateMaterialRequestStatusSchema = z.object({
 async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inferSelect[]) {
   if (requestRows.length === 0) return [];
 
-  const itemRows = await db
-    .select()
-    .from(materialRequestItems)
-    .where(inArray(materialRequestItems.materialRequestId, requestRows.map((row) => row.id)))
-    .orderBy(asc(materialRequestItems.createdAt));
+  let itemRows: typeof materialRequestItems.$inferSelect[] = [];
+
+  try {
+    itemRows = await db
+      .select()
+      .from(materialRequestItems)
+      .where(inArray(materialRequestItems.materialRequestId, requestRows.map((row) => row.id)))
+      .orderBy(asc(materialRequestItems.createdAt));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (!message.includes('material_request_items') || !message.includes('does not exist')) {
+      throw error;
+    }
+  }
 
   return requestRows.map((request) => ({
     ...request,
@@ -53,6 +62,11 @@ async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inf
 router.get('/', async (req, res) => {
   const contractorId = String(req.query.contractorId ?? '').trim();
   const status = String(req.query.status ?? '').trim();
+
+  if (contractorId && !UUID_REGEX.test(contractorId)) {
+    res.json([]);
+    return;
+  }
 
   const filters = [
     contractorId ? eq(materialRequests.contractorId, contractorId) : undefined,
