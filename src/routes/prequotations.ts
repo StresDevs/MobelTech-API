@@ -7,6 +7,7 @@ import { db } from '../db';
 import { clients, contractors, measurements, notifications, prequotationLogs, prequotationUidCounters, prequotationVersions, prequotations, productionItems, productionItemPhases, productionOrders, quotations, quotationItems, users } from '../db/schema';
 import { ensurePrequotationUidSchema } from '../db/ensure-prequotation-uid';
 import { ensureProductionSchema } from '../db/ensure-production-schema';
+import { ensureQuotationWorkflowSchema } from '../db/ensure-quotation-workflow';
 
 const router = Router();
 
@@ -421,6 +422,7 @@ router.post('/:id/confirm', async (req: Request, res: Response) => {
   try {
     await ensurePrequotationUidSchema();
     await ensureProductionSchema();
+    await ensureQuotationWorkflowSchema();
     const id = req.params.id as string;
     const { assignedContractorId, startDate, estimatedDeliveryDate, advanceAmount } = req.body as {
     assignedContractorId?: string;
@@ -466,6 +468,7 @@ router.post('/:id/confirm', async (req: Request, res: Response) => {
     const recipientUserId = contractorRow?.userId ?? provisionedCredentials?.userId ?? null;
 
     const [updatedQuotation] = await db.insert(quotations).values({
+      uid: prequotation.uid ?? null,
       clientId: prequotation.clientId,
       status: 'draft',
       totalAmount: prequotation.totalAmount != null ? String(prequotation.totalAmount) : '0',

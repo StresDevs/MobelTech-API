@@ -7,6 +7,8 @@ import { ensureMaterialRequestsSchema } from './db/ensure-material-requests';
 import { ensureNotificationsSchema } from './db/ensure-notifications';
 import { ensurePrequotationUidSchema } from './db/ensure-prequotation-uid';
 import { ensureProductionItemPhasesSchema } from './db/ensure-production-item-phases';
+import { ensureQuotationWorkflowSchema } from './db/ensure-quotation-workflow';
+import { ensureFurnitureFilesSchema } from './db/ensure-furniture-files';
 
 async function runStartupTasks() {
   const tasks = [
@@ -15,6 +17,8 @@ async function runStartupTasks() {
     ['material-requests', ensureMaterialRequestsSchema],
     ['notifications', ensureNotificationsSchema],
     ['prequotation-uid', ensurePrequotationUidSchema],
+    ['quotation-workflow', ensureQuotationWorkflowSchema],
+    ['furniture-files', ensureFurnitureFilesSchema],
     ['production-item-phases', ensureProductionItemPhasesSchema],
   ] as const;
 

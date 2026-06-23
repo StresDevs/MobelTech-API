@@ -14,6 +14,7 @@ import notificationsRouter from './notifications';
 import inventoryRouter from './inventory';
 import usersRouter from './users';
 import contractorFinanceRouter from './contractor-finance';
+import furnitureFilesRouter from './furniture-files';
 
 const router = Router();
 
@@ -32,5 +33,6 @@ router.use('/preferences', preferencesRouter);
 router.use('/inventory', inventoryRouter);
 router.use('/users', usersRouter);
 router.use('/contractor-finance', contractorFinanceRouter);
+router.use('/furniture-files', furnitureFilesRouter);
 
 export default router;

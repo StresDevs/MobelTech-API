@@ -43,7 +43,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Health check
 app.get('/', (_req, res) => {

@@ -51,3 +51,8 @@ export {
   productionPhaseEnum,
   productionScheduleTypeEnum,
 } from './production';
+export {
+  furnitureFiles,
+  furnitureFileLogs,
+  furnitureFileLogActionEnum,
+} from './furniture';

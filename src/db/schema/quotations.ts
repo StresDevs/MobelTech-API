@@ -20,6 +20,7 @@ export const quotationStatusEnum = pgEnum('quotation_status', [
 
 export const quotations = pgTable('quotations', {
   id: uuid('id').primaryKey().defaultRandom(),
+  uid: varchar('uid', { length: 24 }),
   clientId: uuid('client_id')
     .notNull()
     .references(() => clients.id),

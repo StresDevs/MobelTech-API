@@ -5,6 +5,8 @@ import { db } from '../db';
 import {
   clients,
   contractors,
+  furnitureFileLogs,
+  furnitureFiles,
   notifications,
   projectEnvironments,
   projects,
@@ -15,6 +17,8 @@ import {
 } from '../db/schema';
 import { validate } from '../middleware/validate';
 import { randomUUID } from 'crypto';
+import { ensureQuotationWorkflowSchema } from '../db/ensure-quotation-workflow';
+import { ensureFurnitureFilesSchema } from '../db/ensure-furniture-files';
 
 const router = Router();
 
@@ -74,6 +78,11 @@ const nullableUuidSchema = z.preprocess((value) => {
 const quotationEnvironmentSchema = z.object({
   ambience: z.string().min(1).max(160),
   description: optionalNullableTextSchema,
+  sketchupFileName: optionalNullableTextSchema,
+  sketchupFileUrl: optionalNullableTextSchema,
+  sketchupFileSize: optionalNullableTextSchema,
+  sketchupFileData: optionalNullableTextSchema,
+  uploadedBy: optionalNullableTextSchema,
   price: numericInputSchema,
   estimatedStartDate: dateInputSchema,
   estimatedEndDate: dateInputSchema,
@@ -100,6 +109,7 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
       .select({
         id: prequotations.id,
         title: prequotations.title,
+        uid: prequotations.uid,
         convertedToQuotationId: prequotations.convertedToQuotationId,
       })
       .from(prequotations)
@@ -119,6 +129,9 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
         assignedContractorId: projectEnvironments.assignedContractorId,
         ambience: projectEnvironments.ambience,
         description: projectEnvironments.description,
+        sketchupFileName: projectEnvironments.sketchupFileName,
+        sketchupFileUrl: projectEnvironments.sketchupFileUrl,
+        sketchupFileSize: projectEnvironments.sketchupFileSize,
         price: projectEnvironments.price,
         estimatedStartDate: projectEnvironments.estimatedStartDate,
         estimatedEndDate: projectEnvironments.estimatedEndDate,
@@ -201,6 +214,9 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
       assignedContractorId: environment.assignedContractorId,
       ambience: environment.ambience,
       description: environment.description ?? null,
+      sketchupFileName: environment.sketchupFileName ?? null,
+      sketchupFileUrl: environment.sketchupFileUrl ?? null,
+      sketchupFileSize: environment.sketchupFileSize ?? null,
       price: Number(environment.price ?? 0),
       estimatedStartDate: environment.estimatedStartDate,
       estimatedEndDate: environment.estimatedEndDate,
@@ -213,6 +229,7 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
 
     return {
       id: row.id,
+      uid: row.uid,
       clientId: row.clientId,
       projectId: row.projectId,
       status: row.status,
@@ -230,6 +247,7 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
         ? {
             id: linkedPrequotation.id,
             title: linkedPrequotation.title,
+            uid: linkedPrequotation.uid,
           }
         : null,
     };
@@ -237,9 +255,12 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
 }
 
 async function getHydratedQuotationById(id: string) {
+  await ensureQuotationWorkflowSchema();
+  await ensureFurnitureFilesSchema();
   const rows = await db
     .select({
       id: quotations.id,
+      uid: quotations.uid,
       clientId: quotations.clientId,
       projectId: quotations.projectId,
       status: quotations.status,
@@ -259,9 +280,11 @@ async function getHydratedQuotationById(id: string) {
 }
 
 router.get('/', async (_req: Request, res: Response) => {
+  await ensureQuotationWorkflowSchema();
   const rows = await db
     .select({
       id: quotations.id,
+      uid: quotations.uid,
       clientId: quotations.clientId,
       projectId: quotations.projectId,
       status: quotations.status,
@@ -290,6 +313,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 router.put('/:id', validate(updateQuotationSchema), async (req: Request, res: Response) => {
+  await ensureQuotationWorkflowSchema();
   const id = req.params.id as string;
   const { items, totalAmount, advanceAmount, ...data } = req.body;
 
@@ -329,6 +353,7 @@ router.put('/:id', validate(updateQuotationSchema), async (req: Request, res: Re
 });
 
 router.post('/:id/environment-projects', validate(createQuotationEnvironmentProjectsSchema), async (req: Request, res: Response) => {
+  await ensureQuotationWorkflowSchema();
   const quotationId = req.params.id as string;
   const [quotation] = await db.select().from(quotations).where(eq(quotations.id, quotationId));
 
@@ -389,10 +414,36 @@ router.post('/:id/environment-projects', validate(createQuotationEnvironmentProj
       assignedContractorId: entry.assignedContractorId ?? null,
       ambience: entry.ambience.trim(),
       description: entry.description?.trim() || null,
+      sketchupFileName: entry.sketchupFileName?.trim() || null,
+      sketchupFileUrl: entry.sketchupFileUrl?.trim() || null,
+      sketchupFileSize: entry.sketchupFileSize?.trim() || null,
       price: String(entry.price),
       estimatedStartDate: entry.estimatedStartDate,
       estimatedEndDate: entry.estimatedEndDate,
     }).returning();
+
+    if (entry.sketchupFileName && entry.sketchupFileData) {
+      const [furnitureFile] = await db.insert(furnitureFiles).values({
+        quotationId,
+        projectEnvironmentId: environmentProject.id,
+        clientId: quotation.clientId,
+        assignedContractorId: entry.assignedContractorId ?? null,
+        version: 1,
+        fileName: entry.sketchupFileName.trim(),
+        fileSize: entry.sketchupFileSize?.trim() || null,
+        mimeType: 'application/octet-stream',
+        fileData: entry.sketchupFileData,
+        uploadedBy: entry.uploadedBy?.trim() || 'Usuario',
+        notes: entry.ambience.trim(),
+      }).returning();
+
+      await db.insert(furnitureFileLogs).values({
+        furnitureFileId: furnitureFile.id,
+        action: 'file_uploaded',
+        performedBy: entry.uploadedBy?.trim() || 'Usuario',
+        description: `Archivo SketchUp inicial subido: ${entry.sketchupFileName.trim()} (v1)`,
+      });
+    }
 
     if (entry.assignedContractorId) {
       const contractor = contractorsById.get(entry.assignedContractorId);
