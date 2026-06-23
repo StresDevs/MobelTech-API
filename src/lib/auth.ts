@@ -66,3 +66,16 @@ export function getTokenFromRequestCookie(cookieHeader?: string) {
   const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${COOKIE_NAME}=([^;]+)`));
   return match?.[1] ?? null;
 }
+
+export function getTokenFromAuthorizationHeader(authorizationHeader?: string | null) {
+  if (!authorizationHeader) return null;
+
+  const [scheme, token] = authorizationHeader.trim().split(/\s+/);
+  if (scheme?.toLowerCase() !== 'bearer' || !token) return null;
+
+  return token;
+}
+
+export function getTokenFromRequest(headers: { authorization?: string; cookie?: string }) {
+  return getTokenFromAuthorizationHeader(headers.authorization) ?? getTokenFromRequestCookie(headers.cookie);
+}

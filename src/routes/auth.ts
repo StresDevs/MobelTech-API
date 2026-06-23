@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../db';
 import { users } from '../db/schema';
 import { eq, or } from 'drizzle-orm';
-import { createToken, getTokenFromRequestCookie, serializeAuthCookie, verifyToken } from '../lib/auth';
+import { createToken, getTokenFromRequest, serializeAuthCookie, verifyToken } from '../lib/auth';
 import { validate } from '../middleware/validate';
 
 const router = Router();
@@ -65,7 +65,7 @@ router.post('/login', async (req, res) => {
 });
 
 router.get('/me', async (req, res) => {
-  const token = getTokenFromRequestCookie(req.headers.cookie);
+  const token = getTokenFromRequest(req.headers);
   const auth = verifyToken(token);
   if (!auth) {
     res.status(401).json({ error: 'Unauthorized' });
@@ -93,7 +93,7 @@ router.get('/me', async (req, res) => {
 });
 
 router.post('/change-password', validate(changePasswordSchema), async (req, res) => {
-  const token = getTokenFromRequestCookie(req.headers.cookie);
+  const token = getTokenFromRequest(req.headers);
   const auth = verifyToken(token);
   if (!auth) {
     res.status(401).json({ error: 'Unauthorized' });
