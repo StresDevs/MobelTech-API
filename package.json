@@ -2,7 +2,7 @@
   "name": "mobeltech-api",
   "version": "1.0.0",
   "description": "Repositorio para el desarrollo de la aplicacion de MobelTech API",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
