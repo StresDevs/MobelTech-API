@@ -144,7 +144,9 @@ router.post('/change-password', validate(changePasswordSchema), async (req, res)
 });
 
 router.post('/logout', (_req, res) => {
-  res.setHeader('Set-Cookie', 'mobeltech_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  const sameSite = process.env.NODE_ENV === 'production' ? 'None' : 'Lax';
+  res.setHeader('Set-Cookie', `mobeltech_token=; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=0${secure}`);
   res.json({ ok: true });
 });
 

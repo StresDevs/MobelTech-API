@@ -14,6 +14,7 @@ export interface AuthUser {
 }
 
 const COOKIE_NAME = 'mobeltech_token';
+const isProduction = env.NODE_ENV === 'production';
 
 function base64url(input: Buffer | string) {
   return Buffer.from(input).toString('base64url');
@@ -55,7 +56,9 @@ export function verifyToken(token?: string | null): AuthUser | null {
 }
 
 export function serializeAuthCookie(token: string) {
-  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 7}`;
+  const sameSite = isProduction ? 'None' : 'Lax';
+  const secure = isProduction ? '; Secure' : '';
+  return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=${60 * 60 * 24 * 7}${secure}`;
 }
 
 export function getTokenFromRequestCookie(cookieHeader?: string) {
