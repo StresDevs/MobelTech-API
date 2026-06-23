@@ -66,7 +66,9 @@ const dateInputSchema = z.preprocess((value) => {
 const nullableUuidSchema = z.preprocess((value) => {
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
-  return trimmed === '' ? null : trimmed;
+  if (trimmed === '') return null;
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return uuidPattern.test(trimmed) ? trimmed : null;
 }, z.string().uuid().optional().nullable());
 
 const quotationEnvironmentSchema = z.object({

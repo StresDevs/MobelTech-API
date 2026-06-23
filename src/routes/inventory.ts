@@ -22,22 +22,22 @@ import { validate } from '../middleware/validate';
 const router = Router();
 
 const supplierSchema = z.object({
-  name: z.string().min(1).max(255),
-  nit: z.string().min(1).max(80),
-  phone: z.string().min(1).max(50),
+  name: z.string().min(1, 'El nombre del proveedor es obligatorio.').max(255),
+  nit: z.string().min(1, 'El NIT es obligatorio.').max(80),
+  phone: z.string().min(1, 'El teléfono es obligatorio.').max(50),
   email: z.string().email().optional().or(z.literal('')).nullable(),
   address: z.string().optional().or(z.literal('')).nullable(),
-  supplierType: z.string().min(1).max(100),
+  supplierType: z.string().min(1, 'El tipo de proveedor es obligatorio.').max(100),
 });
 
 const materialSchema = z.object({
-  name: z.string().min(1).max(255),
-  category: z.string().min(1).max(120),
-  supplierId: z.string().uuid(),
-  sku: z.string().min(1).max(80),
-  unit: z.string().min(1).max(50),
-  warehouse: z.string().min(1).max(160),
-  purchaseDate: z.string().min(1),
+  name: z.string().min(1, 'El nombre del material es obligatorio.').max(255),
+  category: z.string().min(1, 'La categoría es obligatoria.').max(120),
+  supplierId: z.string().uuid('Selecciona un proveedor válido.'),
+  sku: z.string().max(80).optional().or(z.literal('')).nullable(),
+  unit: z.string().min(1, 'La unidad es obligatoria.').max(50),
+  warehouse: z.string().min(1, 'El almacén es obligatorio.').max(160),
+  purchaseDate: z.string().min(1, 'La fecha de compra es obligatoria.'),
   purchasePriceBs: z.union([z.number(), z.string()]),
   initialStock: z.union([z.number(), z.string()]),
   minStock: z.union([z.number(), z.string()]),
@@ -56,6 +56,10 @@ const minStockSchema = z.object({
 const stockAdjustmentSchema = z.object({
   quantityToAdd: z.union([z.number(), z.string()]),
   newPriceBs: z.union([z.number(), z.string()]).optional().nullable(),
+});
+
+const warehouseSchema = z.object({
+  name: z.string().min(1, 'El nombre de la ubicación es obligatorio.').max(160),
 });
 
 const defectSchema = z.object({
@@ -79,7 +83,8 @@ const surplusSchema = z.object({
 });
 
 function toNumber(value: unknown) {
-  return Number(value ?? 0);
+  const numeric = Number(value ?? 0);
+  return Number.isFinite(numeric) ? numeric : 0;
 }
 
 function slugCode(value: string) {
@@ -90,6 +95,23 @@ function slugCode(value: string) {
     .replace(/[^A-Z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 20) || 'ALMACEN';
+}
+
+async function generateUniqueMaterialCode(name: string, category: string, currentId?: string) {
+  const base = slugCode(`${category}-${name}`).slice(0, 52) || `ITEM-${Date.now().toString().slice(-6)}`;
+  let candidate = `${base}-${Date.now().toString().slice(-4)}`.slice(0, 80);
+  let suffix = 1;
+
+  while (true) {
+    const [existing] = await db
+      .select({ id: materials.id })
+      .from(materials)
+      .where(eq(materials.sku, candidate));
+
+    if (!existing || existing.id === currentId) return candidate;
+    candidate = `${base}-${suffix}`.slice(0, 80);
+    suffix += 1;
+  }
 }
 
 async function ensureWarehouseByName(name: string) {
@@ -288,6 +310,76 @@ router.get('/overview', async (_req, res) => {
   });
 });
 
+router.get('/warehouses', async (_req, res) => {
+  const rows = await db.select().from(warehouses).orderBy(asc(warehouses.name));
+  res.json(rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    code: row.code,
+    status: row.status,
+  })));
+});
+
+router.post('/warehouses', validate(warehouseSchema), async (req, res) => {
+  const name = req.body.name.trim();
+  const [existing] = await db.select().from(warehouses).where(eq(warehouses.name, name));
+  if (existing) {
+    res.status(400).json({ error: 'La ubicación ya existe.' });
+    return;
+  }
+
+  const [created] = await db.insert(warehouses).values({
+    id: randomUUID(),
+    name,
+    code: `${slugCode(name)}-${Date.now().toString().slice(-4)}`.slice(0, 30),
+    location: name,
+    status: 'active',
+  }).returning();
+
+  res.status(201).json(created);
+});
+
+router.put('/warehouses/:id', validate(warehouseSchema), async (req, res) => {
+  const warehouseId = req.params.id as string;
+  const name = req.body.name.trim();
+
+  const [current] = await db.select().from(warehouses).where(eq(warehouses.id, warehouseId));
+  if (!current) {
+    res.status(404).json({ error: 'Ubicación no encontrada.' });
+    return;
+  }
+
+  const [existing] = await db.select().from(warehouses).where(eq(warehouses.name, name));
+  if (existing && existing.id !== warehouseId) {
+    res.status(400).json({ error: 'La ubicación ya existe.' });
+    return;
+  }
+
+  const [updated] = await db.update(warehouses).set({
+    name,
+    location: name,
+    updatedAt: new Date(),
+  }).where(eq(warehouses.id, warehouseId)).returning();
+
+  await db.update(materials).set({
+    warehouseName: name,
+    updatedAt: new Date(),
+  }).where(eq(materials.warehouseId, warehouseId));
+
+  res.json(updated);
+});
+
+router.delete('/warehouses/:id', async (req, res) => {
+  const warehouseId = req.params.id as string;
+  const [deleted] = await db.delete(warehouses).where(eq(warehouses.id, warehouseId)).returning();
+  if (!deleted) {
+    res.status(404).json({ error: 'Ubicación no encontrada.' });
+    return;
+  }
+
+  res.json({ success: true });
+});
+
 router.post('/suppliers', validate(supplierSchema), async (req, res) => {
   const { name, nit, phone, email, address, supplierType } = req.body;
 
@@ -307,10 +399,24 @@ router.post('/suppliers', validate(supplierSchema), async (req, res) => {
 });
 
 router.post('/materials', validate(materialSchema), async (req, res) => {
+  const [supplier] = await db
+    .select({ id: suppliers.id })
+    .from(suppliers)
+    .where(eq(suppliers.id, req.body.supplierId));
+
+  if (!supplier) {
+    res.status(400).json({ error: 'Selecciona un proveedor válido antes de crear el material.' });
+    return;
+  }
+
+  const materialCode = req.body.sku?.trim()
+    ? req.body.sku.trim()
+    : await generateUniqueMaterialCode(req.body.name, req.body.category);
+
   const [existingBySku] = await db
     .select({ id: materials.id })
     .from(materials)
-    .where(eq(materials.sku, req.body.sku.trim()));
+    .where(eq(materials.sku, materialCode));
 
   if (existingBySku) {
     res.status(400).json({ error: 'El SKU ya existe.' });
@@ -327,7 +433,7 @@ router.post('/materials', validate(materialSchema), async (req, res) => {
     name: req.body.name.trim(),
     category: req.body.category.trim(),
     supplierId: req.body.supplierId,
-    sku: req.body.sku.trim(),
+    sku: materialCode,
     unit: req.body.unit.trim(),
     warehouseId: warehouse.id,
     warehouseName: warehouse.name,
@@ -339,8 +445,8 @@ router.post('/materials', validate(materialSchema), async (req, res) => {
     stockReserved: 0,
     blockedByDefect: 0,
     minStock,
-    imageUrl: req.body.imageUrl?.trim() || null,
-    image: req.body.imageUrl?.trim() || null,
+    imageUrl: typeof req.body.imageUrl === 'string' ? req.body.imageUrl.trim() || null : null,
+    image: typeof req.body.imageUrl === 'string' ? req.body.imageUrl.trim() || null : null,
   }).returning();
 
   await db.insert(materialPriceHistory).values({
@@ -366,11 +472,24 @@ router.put('/materials/:id', validate(materialUpdateSchema), async (req, res) =>
   }
 
   const nextSku = req.body.sku?.trim();
-  if (nextSku && nextSku !== current.sku) {
+  const nextCode = nextSku || current.sku || (await generateUniqueMaterialCode(req.body.name ?? current.name, req.body.category ?? current.category, current.id));
+  if (req.body.supplierId) {
+    const [supplier] = await db
+      .select({ id: suppliers.id })
+      .from(suppliers)
+      .where(eq(suppliers.id, req.body.supplierId));
+
+    if (!supplier) {
+      res.status(400).json({ error: 'Selecciona un proveedor válido antes de actualizar el material.' });
+      return;
+    }
+  }
+
+  if (nextCode && nextCode !== current.sku) {
     const [existingBySku] = await db
       .select({ id: materials.id })
       .from(materials)
-      .where(eq(materials.sku, nextSku));
+      .where(eq(materials.sku, nextCode));
     if (existingBySku) {
       res.status(400).json({ error: 'El SKU ya existe.' });
       return;
@@ -387,7 +506,7 @@ router.put('/materials/:id', validate(materialUpdateSchema), async (req, res) =>
     name: req.body.name?.trim() ?? current.name,
     category: req.body.category?.trim() ?? current.category,
     supplierId: req.body.supplierId ?? current.supplierId,
-    sku: nextSku ?? current.sku,
+    sku: nextCode,
     unit: req.body.unit?.trim() ?? current.unit,
     warehouseId: warehouse?.id ?? current.warehouseId,
     warehouseName: warehouse?.name ?? current.warehouseName,

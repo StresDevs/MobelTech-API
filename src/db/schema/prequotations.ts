@@ -35,6 +35,8 @@ export const prequotationLogActionEnum = pgEnum('prequotation_log_action', [
 
 export const prequotations = pgTable('prequotations', {
   id: uuid('id').primaryKey().defaultRandom(),
+  uid: varchar('uid', { length: 24 }),
+  uidAssignedAt: timestamp('uid_assigned_at', { withTimezone: true }),
   clientId: uuid('client_id')
     .notNull()
     .references(() => clients.id),
@@ -52,6 +54,12 @@ export const prequotations = pgTable('prequotations', {
   totalAmount: numeric('total_amount', { precision: 12, scale: 2 }),
   advanceAmount: numeric('advance_amount', { precision: 12, scale: 2 }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const prequotationUidCounters = pgTable('prequotation_uid_counters', {
+  uidDate: date('uid_date').primaryKey(),
+  nextSequence: integer('next_sequence').notNull().default(1),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

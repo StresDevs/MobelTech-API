@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { env } from '../config/env';
 
-export type AuthRole = 'admin' | 'contractor' | 'architect';
+export type AuthRole = 'admin' | 'contractor' | 'architect' | 'partner';
 
 export interface AuthUser {
   id: string;
@@ -9,6 +9,8 @@ export interface AuthUser {
   email: string;
   role: AuthRole;
   avatar?: string | null;
+  username?: string;
+  mustChangePassword?: boolean;
 }
 
 const COOKIE_NAME = 'mobeltech_token';

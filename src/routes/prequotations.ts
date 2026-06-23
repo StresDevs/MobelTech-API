@@ -1,10 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
-import { and, desc, eq, ilike, or } from 'drizzle-orm';
+import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { validate } from '../middleware/validate';
 import { db } from '../db';
-import { clients, contractors, measurements, notifications, prequotationLogs, prequotationVersions, prequotations, productionItems, productionItemPhases, productionOrders, quotations, quotationItems, users } from '../db/schema';
+import { clients, contractors, measurements, notifications, prequotationLogs, prequotationUidCounters, prequotationVersions, prequotations, productionItems, productionItemPhases, productionOrders, quotations, quotationItems, users } from '../db/schema';
+import { ensurePrequotationUidSchema } from '../db/ensure-prequotation-uid';
+import { ensureProductionSchema } from '../db/ensure-production-schema';
 
 const router = Router();
 
@@ -97,6 +99,67 @@ async function hydratePrequotationRow(prequotation: typeof prequotations.$inferS
   };
 }
 
+function sequenceToLetters(sequence: number) {
+  if (!Number.isInteger(sequence) || sequence < 1) {
+    throw new Error(`Invalid prequotation UID sequence: ${sequence}`);
+  }
+
+  let n = sequence;
+  let output = '';
+  while (n > 0) {
+    n -= 1;
+    output = String.fromCharCode(65 + (n % 26)) + output;
+    n = Math.floor(n / 26);
+  }
+  return output;
+}
+
+function getBusinessDateParts(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/La_Paz',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).formatToParts(date);
+
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    day: lookup.day ?? '01',
+    month: lookup.month ?? '01',
+    year: lookup.year ?? '1970',
+  };
+}
+
+function formatPrequotationUidDate(date: Date) {
+  const { day, month, year } = getBusinessDateParts(date);
+  return `${day}${month}${year}`;
+}
+
+function formatPrequotationCounterDate(date: Date) {
+  const { day, month, year } = getBusinessDateParts(date);
+  return `${year}-${month}-${day}`;
+}
+
+async function allocatePrequotationUid(referenceDate = new Date()) {
+  const [counter] = await db
+    .insert(prequotationUidCounters)
+    .values({ uidDate: formatPrequotationCounterDate(referenceDate) })
+    .onConflictDoUpdate({
+      target: prequotationUidCounters.uidDate,
+      set: {
+        nextSequence: sql`${prequotationUidCounters.nextSequence} + 1`,
+        updatedAt: new Date(),
+      },
+    })
+    .returning({ nextSequence: prequotationUidCounters.nextSequence });
+
+  const sequence = counter?.nextSequence ?? 1;
+  return {
+    uid: `${formatPrequotationUidDate(referenceDate)}${sequenceToLetters(sequence)}`,
+    uidAssignedAt: referenceDate,
+  };
+}
+
 function summarizePrequotation(prequotation: typeof prequotations.$inferSelect) {
   return {
     ...prequotation,
@@ -137,6 +200,7 @@ async function validateMeasurementAnchor({
 
 // GET /api/prequotations
 router.get('/', async (req: Request, res: Response) => {
+  await ensurePrequotationUidSchema();
   const parsed = prequotationListQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: 'Invalid prequotation filters', details: parsed.error.flatten().fieldErrors });
@@ -164,6 +228,8 @@ router.get('/', async (req: Request, res: Response) => {
       status: prequotations.status,
       currentVersion: prequotations.currentVersion,
       createdBy: prequotations.createdBy,
+      uid: prequotations.uid,
+      uidAssignedAt: prequotations.uidAssignedAt,
       assignedContractorId: prequotations.assignedContractorId,
       startDate: prequotations.startDate,
       estimatedDeliveryDate: prequotations.estimatedDeliveryDate,
@@ -185,6 +251,7 @@ router.get('/', async (req: Request, res: Response) => {
 
 // GET /api/prequotations/:id
 router.get('/:id', async (req: Request, res: Response) => {
+  await ensurePrequotationUidSchema();
   const prequotation = await hydratePrequotation(req.params.id as string);
   if (!prequotation) {
     res.status(404).json({ error: 'Prequotation not found' });
@@ -196,6 +263,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 // POST /api/prequotations
 router.post('/', validate(createPrequotationSchema), async (req: Request, res: Response) => {
   try {
+    await ensurePrequotationUidSchema();
     const { versions, logs, totalAmount, advanceAmount, clientId, measurementId, assignedContractorId, startDate, estimatedDeliveryDate, ...data } = req.body;
 
     const [client] = await db.select({ id: clients.id }).from(clients).where(eq(clients.id, clientId));
@@ -210,6 +278,9 @@ router.post('/', validate(createPrequotationSchema), async (req: Request, res: R
       return;
     }
 
+    const shouldAssignUid = (data.status ?? 'draft') === 'in-review';
+    const uidAssignment = shouldAssignUid ? await allocatePrequotationUid(new Date()) : null;
+
     const [created] = await db.insert(prequotations).values({
       clientId,
       measurementId: measurementId ?? null,
@@ -217,6 +288,8 @@ router.post('/', validate(createPrequotationSchema), async (req: Request, res: R
       startDate: startDate ?? null,
       estimatedDeliveryDate: estimatedDeliveryDate ?? null,
       ...data,
+      uid: uidAssignment?.uid ?? null,
+      uidAssignedAt: uidAssignment?.uidAssignedAt ?? null,
       totalAmount: totalAmount != null ? String(totalAmount) : null,
       advanceAmount: advanceAmount != null ? String(advanceAmount) : null,
     }).returning();
@@ -262,6 +335,7 @@ router.post('/', validate(createPrequotationSchema), async (req: Request, res: R
 
 // PUT /api/prequotations/:id
 router.put('/:id', validate(updatePrequotationSchema), async (req: Request, res: Response) => {
+  await ensurePrequotationUidSchema();
   const id = req.params.id as string;
   const { versions, logs, totalAmount, advanceAmount, clientId, measurementId, assignedContractorId, startDate, estimatedDeliveryDate, ...data } = req.body;
 
@@ -286,6 +360,10 @@ router.put('/:id', validate(updatePrequotationSchema), async (req: Request, res:
     return;
   }
 
+  const nextStatus = data.status ?? current.status;
+  const shouldAssignUid = !current.uid && nextStatus === 'in-review';
+  const uidAssignment = shouldAssignUid ? await allocatePrequotationUid(new Date()) : null;
+
   const [updated] = await db
     .update(prequotations)
     .set({
@@ -295,6 +373,7 @@ router.put('/:id', validate(updatePrequotationSchema), async (req: Request, res:
       assignedContractorId: assignedContractorId ?? undefined,
       startDate: startDate ?? undefined,
       estimatedDeliveryDate: estimatedDeliveryDate ?? undefined,
+      ...(uidAssignment ? { uid: uidAssignment.uid, uidAssignedAt: uidAssignment.uidAssignedAt } : {}),
       ...(totalAmount != null ? { totalAmount: String(totalAmount) } : {}),
       ...(advanceAmount != null ? { advanceAmount: String(advanceAmount) } : {}),
       updatedAt: new Date(),
@@ -340,6 +419,8 @@ router.put('/:id', validate(updatePrequotationSchema), async (req: Request, res:
 
 router.post('/:id/confirm', async (req: Request, res: Response) => {
   try {
+    await ensurePrequotationUidSchema();
+    await ensureProductionSchema();
     const id = req.params.id as string;
     const { assignedContractorId, startDate, estimatedDeliveryDate, advanceAmount } = req.body as {
     assignedContractorId?: string;
@@ -467,6 +548,7 @@ router.post('/:id/confirm', async (req: Request, res: Response) => {
 
 // DELETE /api/prequotations/:id
 router.delete('/:id', async (req: Request, res: Response) => {
+  await ensurePrequotationUidSchema();
   const id = req.params.id as string;
   const [deleted] = await db.delete(prequotations).where(eq(prequotations.id, id)).returning();
   if (!deleted) {
@@ -478,6 +560,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
 // POST /api/prequotations/:id/convert
 router.post('/:id/convert', async (req: Request, res: Response) => {
+  await ensurePrequotationUidSchema();
   const { quotationId } = req.body as { quotationId?: string };
   if (!quotationId) {
     res.status(400).json({ error: 'quotationId is required' });
@@ -527,7 +610,7 @@ async function generateAvailableUsername(baseValue: string) {
     const [existing] = await db
       .select({ id: users.id })
       .from(users)
-      .where(eq(users.email, `${candidate}@mobeltech.local`));
+      .where(eq(users.username, candidate));
 
     if (!existing) return candidate;
     suffix += 1;
@@ -543,6 +626,7 @@ async function ensureContractorAccess(contractorId: string, contractorName: stri
   const [user] = await db.insert(users).values({
     id: randomUUID(),
     name: contractorName,
+    username,
     email,
     passwordHash: password,
     role: 'contractor',

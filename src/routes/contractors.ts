@@ -66,6 +66,7 @@ router.post('/', validate(contractorSchema), async (req, res) => {
     const [user] = await db.insert(users).values({
       id: randomUUID(),
       name: contractorData.name,
+      username: generatedUsername,
       email,
       passwordHash: password,
       role: 'contractor',
@@ -150,7 +151,7 @@ async function generateAvailableUsername(baseValue: string) {
     const [existing] = await db
       .select({ id: users.id })
       .from(users)
-      .where(eq(users.email, `${candidate}@mobeltech.local`));
+      .where(eq(users.username, candidate));
 
     if (!existing) return candidate;
     suffix += 1;

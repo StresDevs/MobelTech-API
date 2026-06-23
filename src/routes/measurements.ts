@@ -6,13 +6,101 @@ import { validate } from '../middleware/validate';
 import { z } from 'zod';
 
 const router = Router();
+const BUSINESS_TIMEZONE_OFFSET = '-04:00';
+const BUSINESS_TIMEZONE = 'America/La_Paz';
+type MeasurementStatus = 'scheduled' | 'completed' | 'cancelled';
+
+function normalizeDateInput(value: unknown) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeTimeInput(value: unknown) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return '';
+
+  const hour = Number.parseInt(match[1] ?? '', 10);
+  const minute = Number.parseInt(match[2] ?? '', 10);
+  const second = Number.parseInt(match[3] ?? '00', 10);
+
+  if (Number.isNaN(hour) || Number.isNaN(minute) || Number.isNaN(second)) return '';
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`;
+}
+
+function parseBusinessAppointment(date: string, time: string) {
+  const normalizedDate = normalizeDateInput(date);
+  const normalizedTime = normalizeTimeInput(time);
+  return new Date(`${normalizedDate}T${normalizedTime}${BUSINESS_TIMEZONE_OFFSET}`);
+}
+
+function normalizeFurnitureItemsInput(value: unknown) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
+function normalizeOptionalTextInput(value: unknown) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function getBusinessCalendarKey(date: Date) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+
+  const parts = formatter.formatToParts(date);
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+
+  if (!year || !month || !day) return '';
+  return `${year}-${month}-${day}`;
+}
+
+function isPastBusinessDate(date: string) {
+  const normalizedDate = normalizeDateInput(date);
+  if (!normalizedDate) return true;
+
+  return normalizedDate < getBusinessCalendarKey(new Date());
+}
+
+function normalizeMeasurementPayload(body: Record<string, unknown>) {
+  const clientId = typeof body.clientId === 'string' ? body.clientId.trim() : undefined;
+  const status: MeasurementStatus =
+    body.status === 'completed' || body.status === 'cancelled' || body.status === 'scheduled'
+      ? body.status
+      : 'scheduled';
+
+  return {
+    ...body,
+    clientId,
+    date: normalizeDateInput(body.date),
+    time: normalizeTimeInput(body.time),
+    address: typeof body.address === 'string' ? body.address.trim() : '',
+    phone: typeof body.phone === 'string' ? body.phone.trim() : '',
+    referenceNotes: normalizeOptionalTextInput(body.referenceNotes),
+    furnitureItems: normalizeFurnitureItemsInput(body.furnitureItems),
+    quotationDeliveryDate: normalizeOptionalTextInput(body.quotationDeliveryDate),
+    prequotationLink: normalizeOptionalTextInput(body.prequotationLink),
+    notes: normalizeOptionalTextInput(body.notes),
+    status,
+  };
+}
 
 const baseMeasurementSchema = z.object({
   clientId: z.string().uuid(),
-  date: z.string(), // YYYY-MM-DD
-  time: z.string().max(10),
-  address: z.string().min(1),
-  phone: z.string().min(1).max(50),
+  date: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+  time: z.string().trim().regex(/^\d{1,2}:\d{2}(:\d{2})?$/),
+  address: z.string().trim().min(1),
+  phone: z.string().trim().min(1).max(50),
   referenceNotes: z.string().optional().nullable(),
   furnitureItems: z.array(z.string()).min(1),
   quotationDeliveryDate: z.string().optional().nullable(),
@@ -22,7 +110,7 @@ const baseMeasurementSchema = z.object({
 });
 
 const createMeasurementSchema = baseMeasurementSchema.superRefine((data, ctx) => {
-  const appointment = new Date(`${data.date}T${data.time}`);
+  const appointment = parseBusinessAppointment(data.date, data.time);
   if (Number.isNaN(appointment.getTime())) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -32,11 +120,10 @@ const createMeasurementSchema = baseMeasurementSchema.superRefine((data, ctx) =>
     return;
   }
 
-  const now = new Date();
-  if (appointment.getTime() < now.getTime()) {
+  if (isPastBusinessDate(data.date)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'Measurement appointments cannot be scheduled in the past',
+      message: 'Measurement appointments cannot be scheduled on a past date',
       path: ['date'],
     });
   }
@@ -44,7 +131,7 @@ const createMeasurementSchema = baseMeasurementSchema.superRefine((data, ctx) =>
 
 const updateMeasurementSchema = baseMeasurementSchema.partial().superRefine((data, ctx) => {
   if (data.date && data.time) {
-    const appointment = new Date(`${data.date}T${data.time}`);
+    const appointment = parseBusinessAppointment(data.date, data.time);
     if (Number.isNaN(appointment.getTime())) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -54,11 +141,10 @@ const updateMeasurementSchema = baseMeasurementSchema.partial().superRefine((dat
       return;
     }
 
-    const now = new Date();
-    if (appointment.getTime() < now.getTime()) {
+    if (isPastBusinessDate(data.date)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Measurement appointments cannot be scheduled in the past',
+        message: 'Measurement appointments cannot be scheduled on a past date',
         path: ['date'],
       });
     }
@@ -128,16 +214,46 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 // POST /api/measurements
 router.post('/', validate(createMeasurementSchema), async (req: Request, res: Response) => {
-  const [measurement] = await db.insert(measurements).values(req.body).returning();
+  const normalized = normalizeMeasurementPayload(req.body as Record<string, unknown>);
+  const payload = {
+    clientId: req.body.clientId as string,
+    date: normalized.date,
+    time: normalized.time,
+    address: normalized.address,
+    phone: normalized.phone,
+    referenceNotes: normalized.referenceNotes,
+    furnitureItems: normalized.furnitureItems,
+    quotationDeliveryDate: normalized.quotationDeliveryDate,
+    prequotationLink: normalized.prequotationLink,
+    notes: normalized.notes,
+    status: normalized.status,
+  };
+
+  const [measurement] = await db.insert(measurements).values(payload).returning();
   res.status(201).json(measurement);
 });
 
 // PUT /api/measurements/:id
 router.put('/:id', validate(updateMeasurementSchema), async (req: Request, res: Response) => {
   const id = req.params.id as string;
+  const normalized = normalizeMeasurementPayload(req.body as Record<string, unknown>);
+  const payload: Record<string, unknown> = {};
+
+  if (req.body.clientId !== undefined && normalized.clientId) payload.clientId = normalized.clientId;
+  if (req.body.date !== undefined) payload.date = normalized.date;
+  if (req.body.time !== undefined) payload.time = normalized.time;
+  if (req.body.address !== undefined) payload.address = normalized.address;
+  if (req.body.phone !== undefined) payload.phone = normalized.phone;
+  if (req.body.referenceNotes !== undefined) payload.referenceNotes = normalized.referenceNotes;
+  if (req.body.furnitureItems !== undefined) payload.furnitureItems = normalized.furnitureItems;
+  if (req.body.quotationDeliveryDate !== undefined) payload.quotationDeliveryDate = normalized.quotationDeliveryDate;
+  if (req.body.prequotationLink !== undefined) payload.prequotationLink = normalized.prequotationLink;
+  if (req.body.notes !== undefined) payload.notes = normalized.notes;
+  if (req.body.status !== undefined) payload.status = normalized.status;
+
   const [measurement] = await db
     .update(measurements)
-    .set({ ...req.body, updatedAt: new Date() })
+    .set({ ...payload, updatedAt: new Date() })
     .where(eq(measurements.id, id))
     .returning();
   if (!measurement) {

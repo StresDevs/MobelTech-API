@@ -1,4 +1,4 @@
-export { users, userRoleEnum } from './users';
+export { users, userRoleEnum, userStatusEnum } from './users';
 export { notifications } from './notifications';
 export { appPreferences } from './app-preferences';
 export { clients, clientStatusEnum } from './clients';
@@ -10,10 +10,16 @@ export {
   prequotations,
   prequotationVersions,
   prequotationLogs,
+  prequotationUidCounters,
   prequotationStatusEnum,
   prequotationLogActionEnum,
 } from './prequotations';
 export { contractors, contractorStatusEnum } from './contractors';
+export {
+  contractorPaymentPlans,
+  contractorPaymentPlanLines,
+  contractorPayments,
+} from './contractor-finance';
 export {
   warehouses,
   suppliers,

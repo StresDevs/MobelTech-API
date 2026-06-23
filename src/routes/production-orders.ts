@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { db } from '../db';
 import { productionItems, productionItemPhases, productionOrders, productionSchedulePhases } from '../db/schema';
 import { validate } from '../middleware/validate';
+import { ensureProductionSchema } from '../db/ensure-production-schema';
 
 const router = Router();
 
@@ -12,6 +13,7 @@ const schedulePhaseSchema = z.object({
   phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
   startDate: z.string().min(1),
   endDate: z.string().min(1),
+  cuttingMachine: z.enum(['cortadora-1', 'cortadora-2']).optional().nullable(),
 });
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -43,6 +45,7 @@ async function hydrateProductionOrder(order: typeof productionOrders.$inferSelec
 }
 
 router.get('/', async (req, res) => {
+  await ensureProductionSchema();
   const contractorId = req.query.contractorId as string | undefined;
   const rows = await db.select().from(productionOrders).orderBy(desc(productionOrders.createdAt));
   const filtered = contractorId ? rows.filter((r) => r.assignedContractorId === contractorId) : rows;
@@ -51,6 +54,7 @@ router.get('/', async (req, res) => {
 });
 
 router.get('/:id', async (req, res) => {
+  await ensureProductionSchema();
   const [row] = await db.select().from(productionOrders).where(eq(productionOrders.id, req.params.id as string));
   if (!row) {
     res.status(404).json({ error: 'Production order not found' });
@@ -61,6 +65,7 @@ router.get('/:id', async (req, res) => {
 });
 
 router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => {
+  await ensureProductionSchema();
   const orderId = req.params.id as string;
   const { type, phases, createdBy } = req.body;
   const normalizedCreatedBy = createdBy && UUID_REGEX.test(createdBy) ? createdBy : null;
@@ -86,6 +91,7 @@ router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => 
       phase: phase.phase,
       startDate: phase.startDate,
       endDate: phase.endDate,
+      cuttingMachine: phase.phase === 'cortado' ? phase.cuttingMachine ?? null : null,
       createdBy: normalizedCreatedBy,
       updatedAt: new Date(),
     })),

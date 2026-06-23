@@ -12,6 +12,8 @@ import preferencesRouter from './preferences';
 import quotationsRouter from './quotations';
 import notificationsRouter from './notifications';
 import inventoryRouter from './inventory';
+import usersRouter from './users';
+import contractorFinanceRouter from './contractor-finance';
 
 const router = Router();
 
@@ -28,5 +30,7 @@ router.use('/quotations', quotationsRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/preferences', preferencesRouter);
 router.use('/inventory', inventoryRouter);
+router.use('/users', usersRouter);
+router.use('/contractor-finance', contractorFinanceRouter);
 
 export default router;
