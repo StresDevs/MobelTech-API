@@ -7,20 +7,34 @@ import { errorHandler } from './middleware/error-handler';
 const app = express();
 
 // CORS_ORIGIN supports comma-separated list (e.g. "http://localhost:3000,https://app.example.com")
-const allowedOrigins = env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean);
+function normalizeOrigin(origin: string) {
+  return origin.trim().replace(/\/$/, '');
+}
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // Allow no-origin (curl, server-to-server, health checks) and exact matches
-      if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-        return cb(null, true);
-      }
-      return cb(new Error(`CORS: origin ${origin} not allowed`));
-    },
-    credentials: true,
-  }),
-);
+const allowedOrigins = env.CORS_ORIGIN
+  .split(',')
+  .map((origin) => normalizeOrigin(origin))
+  .filter(Boolean);
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, cb) => {
+    const normalizedOrigin = origin ? normalizeOrigin(origin) : origin;
+
+    // Allow no-origin (curl, server-to-server, health checks) and exact matches
+    if (!normalizedOrigin || allowedOrigins.includes('*') || allowedOrigins.includes(normalizedOrigin)) {
+      return cb(null, true);
+    }
+
+    return cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '8mb' }));
 
