@@ -24,6 +24,12 @@ const updateScheduleSchema = z.object({
   phases: z.array(schedulePhaseSchema).length(5),
 });
 
+const progressSchema = z.object({
+  phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
+});
+
+const PRODUCTION_PHASES = ['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado'] as const;
+
 async function hydrateProductionOrder(order: typeof productionOrders.$inferSelect) {
   const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, order.id));
   const schedulePhases = await db
@@ -98,6 +104,46 @@ router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => 
   );
 
   const hydrated = await hydrateProductionOrder(order);
+  res.json(hydrated);
+});
+
+router.patch('/:id/progress', validate(progressSchema), async (req, res) => {
+  await ensureProductionSchema();
+  const orderId = req.params.id as string;
+  const phaseIndex = PRODUCTION_PHASES.indexOf(req.body.phase);
+  const progress = Math.round(((phaseIndex + 1) / PRODUCTION_PHASES.length) * 100);
+
+  const [order] = await db.select().from(productionOrders).where(eq(productionOrders.id, orderId));
+  if (!order) {
+    res.status(404).json({ error: 'Production order not found' });
+    return;
+  }
+
+  const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, orderId));
+
+  for (const item of items) {
+    await db.update(productionItems).set({
+      progress,
+    }).where(eq(productionItems.id, item.id));
+
+    for (const phase of PRODUCTION_PHASES) {
+      await db.update(productionItemPhases).set({
+        completed: PRODUCTION_PHASES.indexOf(phase) <= phaseIndex ? 'true' : 'false',
+        completedDate: PRODUCTION_PHASES.indexOf(phase) <= phaseIndex ? new Date() : null,
+      }).where(and(
+        eq(productionItemPhases.productionItemId, item.id),
+        eq(productionItemPhases.phase, phase),
+      ));
+    }
+  }
+
+  const [updatedOrder] = await db.update(productionOrders).set({
+    status: req.body.phase === 'entregado' ? 'completed' : 'in-progress',
+    actualDeliveryDate: req.body.phase === 'entregado' ? new Date().toISOString().slice(0, 10) : order.actualDeliveryDate,
+    updatedAt: new Date(),
+  }).where(eq(productionOrders.id, orderId)).returning();
+
+  const hydrated = await hydrateProductionOrder(updatedOrder);
   res.json(hydrated);
 });
 

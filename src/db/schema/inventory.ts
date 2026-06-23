@@ -169,6 +169,7 @@ export const inventoryReturnClaims = pgTable('inventory_return_claims', {
   id: uuid('id').primaryKey().defaultRandom(),
   purchaseOrderRef: varchar('purchase_order_ref', { length: 60 }).notNull(),
   purchaseOrderId: uuid('purchase_order_id').references(() => purchaseOrders.id, { onDelete: 'set null' }),
+  supplierId: uuid('supplier_id').references(() => suppliers.id, { onDelete: 'set null' }),
   materialId: uuid('material_id')
     .notNull()
     .references(() => materials.id),

@@ -16,6 +16,7 @@ import {
   purchaseOrders,
   suppliers,
   warehouses,
+  contractors,
 } from '../db/schema';
 import { validate } from '../middleware/validate';
 
@@ -37,7 +38,7 @@ const materialSchema = z.object({
   sku: z.string().max(80).optional().or(z.literal('')).nullable(),
   unit: z.string().min(1, 'La unidad es obligatoria.').max(50),
   warehouse: z.string().min(1, 'El almacén es obligatorio.').max(160),
-  purchaseDate: z.string().min(1, 'La fecha de compra es obligatoria.'),
+  purchaseDate: z.string().optional().or(z.literal('')).nullable(),
   purchasePriceBs: z.union([z.number(), z.string()]),
   initialStock: z.union([z.number(), z.string()]),
   minStock: z.union([z.number(), z.string()]),
@@ -70,7 +71,8 @@ const defectSchema = z.object({
 });
 
 const claimSchema = z.object({
-  purchaseOrderRef: z.string().min(1).max(60),
+  supplierId: z.string().uuid('Selecciona un proveedor válido.'),
+  purchaseOrderRef: z.string().max(60).optional().or(z.literal('')).nullable(),
   materialId: z.string().uuid(),
   reason: z.string().min(1),
 });
@@ -240,7 +242,7 @@ async function hydratePurchaseOrders() {
 }
 
 router.get('/overview', async (_req, res) => {
-  const [supplierRows, materialRows, warehouseRows, defectRows, claimRows, surplusRows, requestRows, purchaseOrderRows] = await Promise.all([
+  const [supplierRows, materialRows, warehouseRows, defectRows, claimRows, surplusRows, requestRows, purchaseOrderRows, contractorRows] = await Promise.all([
     db.select().from(suppliers).orderBy(asc(suppliers.name)),
     db.select().from(materials).orderBy(asc(materials.name)),
     db.select().from(warehouses).orderBy(asc(warehouses.name)),
@@ -249,6 +251,7 @@ router.get('/overview', async (_req, res) => {
     db.select().from(inventorySurplus).orderBy(desc(inventorySurplus.createdAt)),
     hydrateRequests(),
     hydratePurchaseOrders(),
+    db.select().from(contractors).orderBy(asc(contractors.name)),
   ]);
 
   const hydratedMaterials = await hydrateMaterialRows(materialRows);
@@ -277,6 +280,11 @@ router.get('/overview', async (_req, res) => {
       status: row.status,
     })),
     requests: requestRows,
+    contractors: contractorRows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      userId: row.userId,
+    })),
     defects: defectRows.map((row) => ({
       id: row.id,
       materialId: row.materialId,
@@ -292,6 +300,7 @@ router.get('/overview', async (_req, res) => {
       id: row.id,
       purchaseOrderRef: row.purchaseOrderRef,
       purchaseOrderId: row.purchaseOrderId,
+      supplierId: row.supplierId,
       materialId: row.materialId,
       reason: row.reason,
       status: row.status,
@@ -409,24 +418,25 @@ router.post('/materials', validate(materialSchema), async (req, res) => {
     return;
   }
 
-  const materialCode = req.body.sku?.trim()
-    ? req.body.sku.trim()
-    : await generateUniqueMaterialCode(req.body.name, req.body.category);
+  const materialCode = req.body.sku?.trim() || null;
 
-  const [existingBySku] = await db
-    .select({ id: materials.id })
-    .from(materials)
-    .where(eq(materials.sku, materialCode));
+  if (materialCode) {
+    const [existingBySku] = await db
+      .select({ id: materials.id })
+      .from(materials)
+      .where(eq(materials.sku, materialCode));
 
-  if (existingBySku) {
-    res.status(400).json({ error: 'El SKU ya existe.' });
-    return;
+    if (existingBySku) {
+      res.status(400).json({ error: 'El SKU ya existe.' });
+      return;
+    }
   }
 
   const warehouse = await ensureWarehouseByName(req.body.warehouse);
   const initialStock = Math.max(0, toNumber(req.body.initialStock));
   const price = Math.max(0, toNumber(req.body.purchasePriceBs));
   const minStock = Math.max(0, toNumber(req.body.minStock));
+  const purchaseDate = req.body.purchaseDate?.trim() || new Date().toISOString().slice(0, 10);
 
   const [created] = await db.insert(materials).values({
     id: randomUUID(),
@@ -437,8 +447,8 @@ router.post('/materials', validate(materialSchema), async (req, res) => {
     unit: req.body.unit.trim(),
     warehouseId: warehouse.id,
     warehouseName: warehouse.name,
-    purchaseDate: req.body.purchaseDate,
-    lastPurchaseDate: req.body.purchaseDate,
+    purchaseDate,
+    lastPurchaseDate: purchaseDate,
     unitPrice: String(price),
     stock: initialStock,
     stockPhysical: initialStock,
@@ -452,7 +462,7 @@ router.post('/materials', validate(materialSchema), async (req, res) => {
   await db.insert(materialPriceHistory).values({
     id: randomUUID(),
     materialId: created.id,
-    effectiveDate: req.body.purchaseDate,
+    effectiveDate: purchaseDate,
     priceBs: String(price),
     exchangeRate: '6.96',
     notes: 'Registro inicial',
@@ -471,8 +481,7 @@ router.put('/materials/:id', validate(materialUpdateSchema), async (req, res) =>
     return;
   }
 
-  const nextSku = req.body.sku?.trim();
-  const nextCode = nextSku || current.sku || (await generateUniqueMaterialCode(req.body.name ?? current.name, req.body.category ?? current.category, current.id));
+  const nextCode = req.body.sku !== undefined ? req.body.sku?.trim() || null : current.sku;
   if (req.body.supplierId) {
     const [supplier] = await db
       .select({ id: suppliers.id })
@@ -647,15 +656,23 @@ router.patch('/defects/:id/advance', async (req, res) => {
 });
 
 router.post('/claims', validate(claimSchema), async (req, res) => {
-  const [purchaseOrder] = await db
-    .select()
-    .from(purchaseOrders)
-    .where(eq(purchaseOrders.referenceCode, req.body.purchaseOrderRef.trim()));
+  const [supplier] = await db
+    .select({ id: suppliers.id })
+    .from(suppliers)
+    .where(eq(suppliers.id, req.body.supplierId));
+
+  if (!supplier) {
+    res.status(400).json({ error: 'Selecciona un proveedor válido para el reclamo.' });
+    return;
+  }
+
+  const purchaseOrderRef = req.body.purchaseOrderRef?.trim() || '';
 
   const [created] = await db.insert(inventoryReturnClaims).values({
     id: randomUUID(),
-    purchaseOrderRef: req.body.purchaseOrderRef.trim(),
-    purchaseOrderId: purchaseOrder?.id ?? null,
+    purchaseOrderRef,
+    purchaseOrderId: null,
+    supplierId: supplier.id,
     materialId: req.body.materialId,
     reason: req.body.reason.trim(),
     status: 'abierto',
