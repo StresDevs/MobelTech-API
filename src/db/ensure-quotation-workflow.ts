@@ -32,7 +32,14 @@ export function ensureQuotationWorkflowSchema() {
         ALTER TABLE project_environments
         ADD COLUMN IF NOT EXISTS sketchup_file_name varchar(255),
         ADD COLUMN IF NOT EXISTS sketchup_file_url text,
-        ADD COLUMN IF NOT EXISTS sketchup_file_size varchar(80)
+        ADD COLUMN IF NOT EXISTS sketchup_file_size varchar(80),
+        ADD COLUMN IF NOT EXISTS client_price numeric(12, 2) NOT NULL DEFAULT 0
+      `;
+
+      await sql`
+        UPDATE project_environments
+        SET client_price = COALESCE(client_price, price, 0)
+        WHERE client_price IS NULL OR client_price = 0
       `;
 
       console.log('Quotation workflow schema is ready.');

@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS project_environments (
   sketchup_file_url text,
   sketchup_file_size varchar(80),
   price numeric(12, 2) NOT NULL DEFAULT 0,
+  client_price numeric(12, 2) NOT NULL DEFAULT 0,
   estimated_start_date date NOT NULL,
   estimated_end_date date NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -25,7 +26,12 @@ ALTER TABLE quotations
 ALTER TABLE project_environments
   ADD COLUMN IF NOT EXISTS sketchup_file_name varchar(255),
   ADD COLUMN IF NOT EXISTS sketchup_file_url text,
-  ADD COLUMN IF NOT EXISTS sketchup_file_size varchar(80);
+  ADD COLUMN IF NOT EXISTS sketchup_file_size varchar(80),
+  ADD COLUMN IF NOT EXISTS client_price numeric(12, 2) NOT NULL DEFAULT 0;
+
+UPDATE project_environments
+SET client_price = COALESCE(client_price, price, 0)
+WHERE client_price IS NULL OR client_price = 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS quotations_uid_unique_idx
   ON quotations(uid)

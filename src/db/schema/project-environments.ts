@@ -24,6 +24,7 @@ export const projectEnvironments = pgTable('project_environments', {
   sketchupFileUrl: text('sketchup_file_url'),
   sketchupFileSize: varchar('sketchup_file_size', { length: 80 }),
   price: numeric('price', { precision: 12, scale: 2 }).notNull().default('0'),
+  clientPrice: numeric('client_price', { precision: 12, scale: 2 }).notNull().default('0'),
   estimatedStartDate: date('estimated_start_date').notNull(),
   estimatedEndDate: date('estimated_end_date').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

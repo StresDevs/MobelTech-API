@@ -3,6 +3,8 @@ import { and, asc, desc, eq, gte, ilike, inArray, lte, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
 import {
+  contractorAdvanceRequests,
+  contractorLaborCatalogItems,
   contractorPaymentPlanLines,
   contractorPaymentPlans,
   contractorPayments,
@@ -11,6 +13,7 @@ import {
   projects,
 } from '../db/schema';
 import { validate } from '../middleware/validate';
+import { ensureContractorFinanceSchema } from '../db/ensure-contractor-finance';
 
 const router = Router();
 
@@ -19,6 +22,14 @@ const planLineSchema = z.object({
   phaseKey: z.string().min(1).max(40),
   phaseLabel: z.string().min(1).max(120),
   plannedAmount: z.union([z.number(), z.string()]).optional().default(0),
+  sortOrder: z.number().int().optional().default(0),
+});
+
+const laborCatalogItemSchema = z.object({
+  itemKey: z.string().min(1).max(60),
+  label: z.string().min(1).max(160),
+  defaultAmount: z.union([z.number(), z.string()]),
+  active: z.enum(['true', 'false']).optional().default('true'),
   sortOrder: z.number().int().optional().default(0),
 });
 
@@ -37,6 +48,24 @@ const paymentSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
+const reviewPlanSchema = z.object({
+  reviewStatus: z.enum(['submitted', 'approved', 'rejected']),
+  reviewNotes: z.string().optional().nullable(),
+});
+
+const advanceRequestSchema = z.object({
+  planId: z.string().uuid(),
+  contractorId: z.string().uuid(),
+  productionOrderId: z.string().uuid(),
+  amount: z.union([z.number(), z.string()]),
+  notes: z.string().optional().nullable(),
+});
+
+const reviewAdvanceSchema = z.object({
+  status: z.enum(['submitted', 'approved', 'rejected', 'paid']),
+  reviewNotes: z.string().optional().nullable(),
+});
+
 function toNumber(value: unknown) {
   const numeric = Number(value ?? 0);
   return Number.isFinite(numeric) ? numeric : 0;
@@ -44,6 +73,26 @@ function toNumber(value: unknown) {
 
 function money(value: unknown) {
   return String(toNumber(value).toFixed(2));
+}
+
+function normalizeLaborItem(row: typeof contractorLaborCatalogItems.$inferSelect) {
+  return {
+    ...row,
+    defaultAmount: toNumber(row.defaultAmount),
+    active: row.active !== 'false',
+  };
+}
+
+function normalizeAdvanceRequest(row: typeof contractorAdvanceRequests.$inferSelect & {
+  contractorName?: string | null;
+  jobName?: string | null;
+}) {
+  return {
+    ...row,
+    amount: toNumber(row.amount),
+    contractorName: row.contractorName ?? 'Contratista',
+    jobName: row.jobName ?? 'Trabajo sin nombre',
+  };
 }
 
 async function hydratePlans(filters?: {
@@ -68,6 +117,8 @@ async function hydratePlans(filters?: {
       contractorId: contractorPaymentPlans.contractorId,
       productionOrderId: contractorPaymentPlans.productionOrderId,
       totalAmount: contractorPaymentPlans.totalAmount,
+      reviewStatus: contractorPaymentPlans.reviewStatus,
+      reviewNotes: contractorPaymentPlans.reviewNotes,
       createdAt: contractorPaymentPlans.createdAt,
       updatedAt: contractorPaymentPlans.updatedAt,
       contractorName: contractors.name,
@@ -112,6 +163,8 @@ async function hydratePlans(filters?: {
       contractorName: row.contractorName ?? 'Contratista',
       jobName: row.jobName ?? 'Trabajo sin nombre',
       totalAmount,
+      reviewStatus: row.reviewStatus,
+      reviewNotes: row.reviewNotes,
       paidAmount,
       remainingAmount: Math.max(totalAmount - paidAmount, 0),
       lines: planLines.map((line) => {
@@ -139,6 +192,7 @@ async function hydratePlans(filters?: {
 }
 
 router.get('/options', async (_req, res) => {
+  await ensureContractorFinanceSchema();
   const contractorRows = await db
     .select({
       id: contractors.id,
@@ -173,7 +227,59 @@ router.get('/options', async (_req, res) => {
   });
 });
 
+router.get('/labor-items', async (req, res) => {
+  await ensureContractorFinanceSchema();
+  const activeOnly = req.query.activeOnly !== 'false';
+  const rows = await db
+    .select()
+    .from(contractorLaborCatalogItems)
+    .where(activeOnly ? eq(contractorLaborCatalogItems.active, 'true') : undefined)
+    .orderBy(asc(contractorLaborCatalogItems.sortOrder), asc(contractorLaborCatalogItems.label));
+
+  res.json(rows.map(normalizeLaborItem));
+});
+
+router.post('/labor-items', validate(laborCatalogItemSchema), async (req, res) => {
+  await ensureContractorFinanceSchema();
+  const [created] = await db
+    .insert(contractorLaborCatalogItems)
+    .values({
+      itemKey: req.body.itemKey.trim(),
+      label: req.body.label.trim(),
+      defaultAmount: money(req.body.defaultAmount),
+      active: req.body.active ?? 'true',
+      sortOrder: req.body.sortOrder ?? 0,
+    })
+    .returning();
+
+  res.status(201).json(normalizeLaborItem(created));
+});
+
+router.put('/labor-items/:id', validate(laborCatalogItemSchema.partial()), async (req, res) => {
+  await ensureContractorFinanceSchema();
+  const [updated] = await db
+    .update(contractorLaborCatalogItems)
+    .set({
+      ...(req.body.itemKey !== undefined ? { itemKey: req.body.itemKey.trim() } : {}),
+      ...(req.body.label !== undefined ? { label: req.body.label.trim() } : {}),
+      ...(req.body.defaultAmount !== undefined ? { defaultAmount: money(req.body.defaultAmount) } : {}),
+      ...(req.body.active !== undefined ? { active: req.body.active } : {}),
+      ...(req.body.sortOrder !== undefined ? { sortOrder: req.body.sortOrder } : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(contractorLaborCatalogItems.id, req.params.id as string))
+    .returning();
+
+  if (!updated) {
+    res.status(404).json({ error: 'Item de mano de obra no encontrado' });
+    return;
+  }
+
+  res.json(normalizeLaborItem(updated));
+});
+
 router.get('/plans', async (req, res) => {
+  await ensureContractorFinanceSchema();
   const plans = await hydratePlans({
     contractorId: typeof req.query.contractorId === 'string' && req.query.contractorId !== 'all' ? req.query.contractorId : undefined,
     search: typeof req.query.search === 'string' ? req.query.search.trim() : undefined,
@@ -184,6 +290,7 @@ router.get('/plans', async (req, res) => {
 });
 
 router.post('/plans', validate(planSchema), async (req, res) => {
+  await ensureContractorFinanceSchema();
   const totalAmount = toNumber(req.body.totalAmount);
   if (totalAmount <= 0) {
     res.status(400).json({ error: 'El monto total debe ser mayor a 0' });
@@ -226,7 +333,7 @@ router.post('/plans', validate(planSchema), async (req, res) => {
   const [plan] = existing
     ? await db
         .update(contractorPaymentPlans)
-        .set({ totalAmount: money(totalAmount), updatedAt: new Date() })
+        .set({ totalAmount: money(totalAmount), reviewStatus: 'submitted', reviewNotes: null, updatedAt: new Date() })
         .where(eq(contractorPaymentPlans.id, existing.id))
         .returning()
     : await db
@@ -235,6 +342,8 @@ router.post('/plans', validate(planSchema), async (req, res) => {
           contractorId: req.body.contractorId,
           productionOrderId: req.body.productionOrderId,
           totalAmount: money(totalAmount),
+          reviewStatus: 'submitted',
+          reviewNotes: null,
         })
         .returning();
 
@@ -297,7 +406,132 @@ router.post('/plans', validate(planSchema), async (req, res) => {
   res.status(existing ? 200 : 201).json(updatedPlans.find((entry) => entry.id === plan.id) ?? null);
 });
 
+router.patch('/plans/:id/review', validate(reviewPlanSchema), async (req, res) => {
+  await ensureContractorFinanceSchema();
+  const [plan] = await db
+    .update(contractorPaymentPlans)
+    .set({
+      reviewStatus: req.body.reviewStatus,
+      reviewNotes: req.body.reviewNotes?.trim() || null,
+      updatedAt: new Date(),
+    })
+    .where(eq(contractorPaymentPlans.id, req.params.id as string))
+    .returning();
+
+  if (!plan) {
+    res.status(404).json({ error: 'Plan de mano de obra no encontrado' });
+    return;
+  }
+
+  const updatedPlans = await hydratePlans();
+  res.json(updatedPlans.find((entry) => entry.id === plan.id) ?? null);
+});
+
+router.get('/advance-requests', async (req, res) => {
+  await ensureContractorFinanceSchema();
+  const conditions = [
+    typeof req.query.contractorId === 'string' ? eq(contractorAdvanceRequests.contractorId, req.query.contractorId) : undefined,
+    typeof req.query.planId === 'string' ? eq(contractorAdvanceRequests.planId, req.query.planId) : undefined,
+  ].filter(Boolean);
+
+  const rows = await db
+    .select({
+      id: contractorAdvanceRequests.id,
+      planId: contractorAdvanceRequests.planId,
+      contractorId: contractorAdvanceRequests.contractorId,
+      productionOrderId: contractorAdvanceRequests.productionOrderId,
+      amount: contractorAdvanceRequests.amount,
+      status: contractorAdvanceRequests.status,
+      notes: contractorAdvanceRequests.notes,
+      reviewNotes: contractorAdvanceRequests.reviewNotes,
+      requestedAt: contractorAdvanceRequests.requestedAt,
+      reviewedAt: contractorAdvanceRequests.reviewedAt,
+      createdAt: contractorAdvanceRequests.createdAt,
+      updatedAt: contractorAdvanceRequests.updatedAt,
+      contractorName: contractors.name,
+      jobName: projects.name,
+    })
+    .from(contractorAdvanceRequests)
+    .leftJoin(contractors, eq(contractorAdvanceRequests.contractorId, contractors.id))
+    .leftJoin(productionOrders, eq(contractorAdvanceRequests.productionOrderId, productionOrders.id))
+    .leftJoin(projects, eq(productionOrders.projectId, projects.id))
+    .where(conditions.length ? and(...conditions) : undefined)
+    .orderBy(desc(contractorAdvanceRequests.requestedAt));
+
+  res.json(rows.map(normalizeAdvanceRequest));
+});
+
+router.post('/advance-requests', validate(advanceRequestSchema), async (req, res) => {
+  await ensureContractorFinanceSchema();
+  const amount = toNumber(req.body.amount);
+  if (amount <= 0) {
+    res.status(400).json({ error: 'El anticipo debe ser mayor a 0' });
+    return;
+  }
+
+  const [plan] = await db
+    .select({
+      id: contractorPaymentPlans.id,
+      contractorId: contractorPaymentPlans.contractorId,
+      productionOrderId: contractorPaymentPlans.productionOrderId,
+      totalAmount: contractorPaymentPlans.totalAmount,
+      reviewStatus: contractorPaymentPlans.reviewStatus,
+    })
+    .from(contractorPaymentPlans)
+    .where(eq(contractorPaymentPlans.id, req.body.planId));
+
+  if (!plan || plan.contractorId !== req.body.contractorId || plan.productionOrderId !== req.body.productionOrderId) {
+    res.status(400).json({ error: 'El plan de mano de obra no coincide con el trabajo seleccionado' });
+    return;
+  }
+  if (plan.reviewStatus !== 'approved') {
+    res.status(400).json({ error: 'La mano de obra debe estar aprobada antes de solicitar anticipo' });
+    return;
+  }
+  if (amount > toNumber(plan.totalAmount)) {
+    res.status(400).json({ error: 'El anticipo no puede superar el total aprobado' });
+    return;
+  }
+
+  const [created] = await db
+    .insert(contractorAdvanceRequests)
+    .values({
+      planId: req.body.planId,
+      contractorId: req.body.contractorId,
+      productionOrderId: req.body.productionOrderId,
+      amount: money(amount),
+      notes: req.body.notes ?? null,
+      status: 'submitted',
+      reviewNotes: null,
+    })
+    .returning();
+
+  res.status(201).json(normalizeAdvanceRequest(created));
+});
+
+router.patch('/advance-requests/:id/review', validate(reviewAdvanceSchema), async (req, res) => {
+  await ensureContractorFinanceSchema();
+  const [updated] = await db
+    .update(contractorAdvanceRequests)
+    .set({
+      status: req.body.status,
+      reviewNotes: req.body.reviewNotes?.trim() || null,
+      reviewedAt: req.body.status === 'submitted' ? null : new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(contractorAdvanceRequests.id, req.params.id as string))
+    .returning();
+
+  if (!updated) {
+    res.status(404).json({ error: 'Solicitud de anticipo no encontrada' });
+    return;
+  }
+
+  res.json(normalizeAdvanceRequest(updated));
+});
+
 router.post('/payments', validate(paymentSchema), async (req, res) => {
+  await ensureContractorFinanceSchema();
   const amount = toNumber(req.body.amount);
   if (amount <= 0) {
     res.status(400).json({ error: 'El monto del pago debe ser mayor a 0' });

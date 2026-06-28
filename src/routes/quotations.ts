@@ -84,6 +84,7 @@ const quotationEnvironmentSchema = z.object({
   sketchupFileData: optionalNullableTextSchema,
   uploadedBy: optionalNullableTextSchema,
   price: numericInputSchema,
+  clientPrice: numericInputSchema.optional(),
   estimatedStartDate: dateInputSchema,
   estimatedEndDate: dateInputSchema,
   assignedContractorId: nullableUuidSchema,
@@ -133,6 +134,7 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
         sketchupFileUrl: projectEnvironments.sketchupFileUrl,
         sketchupFileSize: projectEnvironments.sketchupFileSize,
         price: projectEnvironments.price,
+        clientPrice: projectEnvironments.clientPrice,
         estimatedStartDate: projectEnvironments.estimatedStartDate,
         estimatedEndDate: projectEnvironments.estimatedEndDate,
         createdAt: projectEnvironments.createdAt,
@@ -218,6 +220,7 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
       sketchupFileUrl: environment.sketchupFileUrl ?? null,
       sketchupFileSize: environment.sketchupFileSize ?? null,
       price: Number(environment.price ?? 0),
+      clientPrice: Number(environment.clientPrice ?? environment.price ?? 0),
       estimatedStartDate: environment.estimatedStartDate,
       estimatedEndDate: environment.estimatedEndDate,
       contractorName: environment.assignedContractorId
@@ -398,14 +401,15 @@ router.post('/:id/environment-projects', validate(createQuotationEnvironmentProj
   }
 
   for (const entry of payloadProjects) {
+    const clientPrice = entry.clientPrice ?? entry.price;
     const [project] = await db.insert(projects).values({
       name: entry.ambience.trim(),
       clientId: quotation.clientId,
       status: 'production',
       startDate: entry.estimatedStartDate,
       estimatedDeliveryDate: entry.estimatedEndDate,
-      budget: String(entry.price),
-      totalRevenue: String(entry.price),
+      budget: String(clientPrice),
+      totalRevenue: String(clientPrice),
     }).returning();
 
     const [environmentProject] = await db.insert(projectEnvironments).values({
@@ -417,7 +421,8 @@ router.post('/:id/environment-projects', validate(createQuotationEnvironmentProj
       sketchupFileName: entry.sketchupFileName?.trim() || null,
       sketchupFileUrl: entry.sketchupFileUrl?.trim() || null,
       sketchupFileSize: entry.sketchupFileSize?.trim() || null,
-      price: String(entry.price),
+      price: String(clientPrice),
+      clientPrice: String(clientPrice),
       estimatedStartDate: entry.estimatedStartDate,
       estimatedEndDate: entry.estimatedEndDate,
     }).returning();

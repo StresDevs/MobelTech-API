@@ -23,6 +23,7 @@ export const furnitureFiles = pgTable('furniture_files', {
   projectEnvironmentId: uuid('project_environment_id').references(() => projectEnvironments.id, { onDelete: 'cascade' }),
   clientId: uuid('client_id').references(() => clients.id, { onDelete: 'set null' }),
   assignedContractorId: uuid('assigned_contractor_id').references(() => contractors.id, { onDelete: 'set null' }),
+  fileKind: varchar('file_kind', { length: 40 }).notNull().default('initial'),
   version: integer('version').notNull().default(1),
   fileName: varchar('file_name', { length: 255 }).notNull(),
   fileSize: varchar('file_size', { length: 80 }),

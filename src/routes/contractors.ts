@@ -26,7 +26,78 @@ const contractorSchema = z.object({
 
 const updateContractorSchema = contractorSchema.partial();
 
+async function ensureContractorProfilesForUsers() {
+  const [contractorRows, contractorUsers] = await Promise.all([
+    db
+      .select({
+        id: contractors.id,
+        name: contractors.name,
+        email: contractors.email,
+        userId: contractors.userId,
+      })
+      .from(contractors),
+    db
+      .select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        status: users.status,
+      })
+      .from(users)
+      .where(eq(users.role, 'contractor')),
+  ]);
+
+  const linkedUserIds = new Set(contractorRows.map((row) => row.userId).filter(Boolean));
+  const missingUsers = contractorUsers.filter((user) => !linkedUserIds.has(user.id));
+
+  if (missingUsers.length === 0) return;
+
+  for (const user of missingUsers) {
+    const existingByEmail = contractorRows.find((contractor) => (
+      contractor.email?.toLowerCase() === user.email.toLowerCase()
+    ));
+
+    if (existingByEmail && !existingByEmail.userId) {
+      await db
+        .update(contractors)
+        .set({
+          userId: user.id,
+          status: user.status,
+          updatedAt: new Date(),
+        })
+        .where(eq(contractors.id, existingByEmail.id));
+      existingByEmail.userId = user.id;
+      continue;
+    }
+
+    if (existingByEmail) continue;
+
+    try {
+      const [created] = await db.insert(contractors).values({
+        name: user.name,
+        phone: 'Sin telefono',
+        email: user.email,
+        userId: user.id,
+        specialization: 'Contratista',
+        status: user.status,
+        advance1: '0',
+        balance: '0',
+      }).returning({ id: contractors.id });
+
+      contractorRows.push({
+        id: created.id,
+        name: user.name,
+        email: user.email,
+        userId: user.id,
+      });
+    } catch (error) {
+      console.error('Contractor profile sync skipped:', error instanceof Error ? error.message : error);
+    }
+  }
+}
+
 router.get('/', async (_req, res) => {
+  await ensureContractorProfilesForUsers();
   const result = await db.select({
     id: contractors.id,
     name: contractors.name,

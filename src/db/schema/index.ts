@@ -18,6 +18,8 @@ export { contractors, contractorStatusEnum } from './contractors';
 export {
   contractorPaymentPlans,
   contractorPaymentPlanLines,
+  contractorLaborCatalogItems,
+  contractorAdvanceRequests,
   contractorPayments,
 } from './contractor-finance';
 export {
