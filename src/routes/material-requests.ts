@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { Router } from 'express';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
 import {
@@ -57,6 +57,13 @@ async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inf
     ...request,
     items: itemRows.filter((item) => item.materialRequestId === request.id),
   }));
+}
+
+async function getOperationsRecipients() {
+  return db
+    .select({ id: users.id })
+    .from(users)
+    .where(or(eq(users.role, 'admin'), eq(users.role, 'architect')));
 }
 
 router.get('/', async (req, res) => {
@@ -128,10 +135,7 @@ router.post('/', validate(createMaterialRequestSchema), async (req, res) => {
     })),
   );
 
-  const adminUsers = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.role, 'admin'));
+  const adminUsers = await getOperationsRecipients();
 
   if (adminUsers.length > 0) {
     await db.insert(notifications).values(

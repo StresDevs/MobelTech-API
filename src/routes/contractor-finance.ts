@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Router } from 'express';
 import { and, asc, desc, eq, gte, ilike, inArray, lte, or } from 'drizzle-orm';
 import { z } from 'zod';
@@ -9,8 +10,10 @@ import {
   contractorPaymentPlans,
   contractorPayments,
   contractors,
+  notifications,
   productionOrders,
   projects,
+  users,
 } from '../db/schema';
 import { validate } from '../middleware/validate';
 import { ensureContractorFinanceSchema } from '../db/ensure-contractor-finance';
@@ -93,6 +96,27 @@ function normalizeAdvanceRequest(row: typeof contractorAdvanceRequests.$inferSel
     contractorName: row.contractorName ?? 'Contratista',
     jobName: row.jobName ?? 'Trabajo sin nombre',
   };
+}
+
+async function getOperationsRecipients() {
+  return db
+    .select({ id: users.id })
+    .from(users)
+    .where(or(eq(users.role, 'admin'), eq(users.role, 'architect')));
+}
+
+async function notifyOperations(message: string, relatedJobId?: string | null) {
+  const recipients = await getOperationsRecipients();
+  if (recipients.length === 0) return;
+
+  await db.insert(notifications).values(
+    recipients.map((recipient) => ({
+      id: randomUUID(),
+      recipientUserId: recipient.id,
+      message,
+      relatedJobId: relatedJobId ?? null,
+    })),
+  );
 }
 
 async function hydratePlans(filters?: {
@@ -298,7 +322,7 @@ router.post('/plans', validate(planSchema), async (req, res) => {
   }
 
   const [contractor] = await db
-    .select({ id: contractors.id })
+    .select({ id: contractors.id, name: contractors.name })
     .from(contractors)
     .where(eq(contractors.id, req.body.contractorId));
 
@@ -402,6 +426,11 @@ router.post('/plans', validate(planSchema), async (req, res) => {
     await db.delete(contractorPaymentPlanLines).where(eq(contractorPaymentPlanLines.id, line.id));
   }
 
+  await notifyOperations(
+    `Nueva solicitud de pago de mano de obra de ${contractor.name}.`,
+    plan.productionOrderId,
+  );
+
   const updatedPlans = await hydratePlans();
   res.status(existing ? 200 : 201).json(updatedPlans.find((entry) => entry.id === plan.id) ?? null);
 });
@@ -493,6 +522,11 @@ router.post('/advance-requests', validate(advanceRequestSchema), async (req, res
     return;
   }
 
+  const [contractor] = await db
+    .select({ name: contractors.name })
+    .from(contractors)
+    .where(eq(contractors.id, req.body.contractorId));
+
   const [created] = await db
     .insert(contractorAdvanceRequests)
     .values({
@@ -505,6 +539,11 @@ router.post('/advance-requests', validate(advanceRequestSchema), async (req, res
       reviewNotes: null,
     })
     .returning();
+
+  await notifyOperations(
+    `Nueva solicitud de anticipo de mano de obra de ${contractor?.name ?? 'un contratista'}.`,
+    req.body.productionOrderId,
+  );
 
   res.status(201).json(normalizeAdvanceRequest(created));
 });

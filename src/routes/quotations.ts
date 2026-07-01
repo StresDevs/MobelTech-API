@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
 import {
@@ -92,6 +92,10 @@ const quotationEnvironmentSchema = z.object({
 
 const createQuotationEnvironmentProjectsSchema = z.object({
   projects: z.array(quotationEnvironmentSchema).min(1),
+});
+
+const updateQuotationEnvironmentProjectSchema = quotationEnvironmentSchema.partial().extend({
+  modificationNote: z.string().trim().min(1, 'Modification note is required').max(1000),
 });
 
 type QuotationRow = typeof quotations.$inferSelect;
@@ -282,6 +286,38 @@ async function getHydratedQuotationById(id: string) {
   return hydrated[0] ?? null;
 }
 
+async function getEnvironmentClientPriceTotal(quotationId: string, overrides?: { environmentId?: string; clientPrice?: number }) {
+  const rows = await db
+    .select({
+      id: projectEnvironments.id,
+      price: projectEnvironments.price,
+      clientPrice: projectEnvironments.clientPrice,
+    })
+    .from(projectEnvironments)
+    .where(eq(projectEnvironments.quotationId, quotationId));
+
+  return rows.reduce((sum, row) => {
+    if (overrides?.environmentId && row.id === overrides.environmentId) {
+      return sum + (overrides.clientPrice ?? Number(row.clientPrice ?? row.price ?? 0));
+    }
+
+    return sum + Number(row.clientPrice ?? row.price ?? 0);
+  }, 0);
+}
+
+function getQuotationLimit(quotation: typeof quotations.$inferSelect) {
+  return Number(quotation.totalAmount ?? 0);
+}
+
+function rejectEnvironmentBudgetOverflow(res: Response, total: number, limit: number) {
+  res.status(400).json({
+    error: `La suma de ambientes (${total.toFixed(2)} Bs) excede el monto cotizado (${limit.toFixed(2)} Bs).`,
+    total,
+    limit,
+    exceededBy: total - limit,
+  });
+}
+
 router.get('/', async (_req: Request, res: Response) => {
   await ensureQuotationWorkflowSchema();
   const rows = await db
@@ -400,6 +436,14 @@ router.post('/:id/environment-projects', validate(createQuotationEnvironmentProj
     }
   }
 
+  const currentEnvironmentTotal = await getEnvironmentClientPriceTotal(quotationId);
+  const newEnvironmentTotal = payloadProjects.reduce((sum, entry) => sum + Number(entry.clientPrice ?? entry.price ?? 0), 0);
+  const quotationLimit = getQuotationLimit(quotation);
+  if (currentEnvironmentTotal + newEnvironmentTotal > quotationLimit) {
+    rejectEnvironmentBudgetOverflow(res, currentEnvironmentTotal + newEnvironmentTotal, quotationLimit);
+    return;
+  }
+
   for (const entry of payloadProjects) {
     const clientPrice = entry.clientPrice ?? entry.price;
     const [project] = await db.insert(projects).values({
@@ -478,5 +522,117 @@ router.post('/:id/environment-projects', validate(createQuotationEnvironmentProj
 
   res.status(201).json(await getHydratedQuotationById(quotationId));
 });
+
+router.put(
+  '/:id/environment-projects/:environmentId',
+  validate(updateQuotationEnvironmentProjectSchema),
+  async (req: Request, res: Response) => {
+    await ensureQuotationWorkflowSchema();
+    const quotationId = req.params.id as string;
+    const environmentId = req.params.environmentId as string;
+
+    const [quotation] = await db.select().from(quotations).where(eq(quotations.id, quotationId));
+    if (!quotation) {
+      res.status(404).json({ error: 'Quotation not found' });
+      return;
+    }
+
+    const [environment] = await db
+      .select()
+      .from(projectEnvironments)
+      .where(and(eq(projectEnvironments.id, environmentId), eq(projectEnvironments.quotationId, quotationId)));
+
+    if (!environment) {
+      res.status(404).json({ error: 'Environment project not found' });
+      return;
+    }
+
+    const payload = req.body as z.infer<typeof updateQuotationEnvironmentProjectSchema>;
+    const nextClientPrice = Number(payload.clientPrice ?? payload.price ?? environment.clientPrice ?? environment.price ?? 0);
+    const nextEnvironmentTotal = await getEnvironmentClientPriceTotal(quotationId, {
+      environmentId,
+      clientPrice: nextClientPrice,
+    });
+    const quotationLimit = getQuotationLimit(quotation);
+
+    if (nextEnvironmentTotal > quotationLimit) {
+      rejectEnvironmentBudgetOverflow(res, nextEnvironmentTotal, quotationLimit);
+      return;
+    }
+
+    if (payload.assignedContractorId) {
+      const [contractor] = await db
+        .select({ id: contractors.id })
+        .from(contractors)
+        .where(eq(contractors.id, payload.assignedContractorId));
+
+      if (!contractor) {
+        res.status(400).json({ error: 'Assigned contractor was not found' });
+        return;
+      }
+    }
+
+    const nextStartDate = payload.estimatedStartDate ?? environment.estimatedStartDate;
+    const nextEndDate = payload.estimatedEndDate ?? environment.estimatedEndDate;
+    if (new Date(nextEndDate).getTime() < new Date(nextStartDate).getTime()) {
+      res.status(400).json({ error: 'Environment project must have a valid estimated date range' });
+      return;
+    }
+
+    const timestamp = new Intl.DateTimeFormat('es-BO', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'America/La_Paz',
+    }).format(new Date());
+    const noteBlock = `[${timestamp}] ${payload.modificationNote.trim()}`;
+    const nextDescriptionBase = payload.description !== undefined ? payload.description?.trim() || '' : environment.description ?? '';
+    const nextDescription = `${nextDescriptionBase}${nextDescriptionBase ? '\n\n' : ''}Nota de modificación: ${noteBlock}`;
+
+    await db
+      .update(projectEnvironments)
+      .set({
+        ...(payload.ambience !== undefined ? { ambience: payload.ambience.trim() } : {}),
+        description: nextDescription,
+        ...(payload.assignedContractorId !== undefined ? { assignedContractorId: payload.assignedContractorId ?? null } : {}),
+        ...(payload.sketchupFileName !== undefined ? { sketchupFileName: payload.sketchupFileName?.trim() || null } : {}),
+        ...(payload.sketchupFileUrl !== undefined ? { sketchupFileUrl: payload.sketchupFileUrl?.trim() || null } : {}),
+        ...(payload.sketchupFileSize !== undefined ? { sketchupFileSize: payload.sketchupFileSize?.trim() || null } : {}),
+        ...(payload.price !== undefined || payload.clientPrice !== undefined
+          ? { price: String(nextClientPrice), clientPrice: String(nextClientPrice) }
+          : {}),
+        ...(payload.estimatedStartDate !== undefined ? { estimatedStartDate: payload.estimatedStartDate } : {}),
+        ...(payload.estimatedEndDate !== undefined ? { estimatedEndDate: payload.estimatedEndDate } : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(projectEnvironments.id, environmentId));
+
+    if (environment.projectId) {
+      await db
+        .update(projects)
+        .set({
+          ...(payload.ambience !== undefined ? { name: payload.ambience.trim() } : {}),
+          ...(payload.estimatedStartDate !== undefined ? { startDate: payload.estimatedStartDate } : {}),
+          ...(payload.estimatedEndDate !== undefined ? { estimatedDeliveryDate: payload.estimatedEndDate } : {}),
+          ...(payload.price !== undefined || payload.clientPrice !== undefined
+            ? { budget: String(nextClientPrice), totalRevenue: String(nextClientPrice) }
+            : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(projects.id, environment.projectId));
+
+      await db
+        .update(productionOrders)
+        .set({
+          ...(payload.assignedContractorId !== undefined ? { assignedContractorId: payload.assignedContractorId ?? null } : {}),
+          ...(payload.estimatedStartDate !== undefined ? { startDate: payload.estimatedStartDate } : {}),
+          ...(payload.estimatedEndDate !== undefined ? { estimatedDeliveryDate: payload.estimatedEndDate } : {}),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(productionOrders.projectId, environment.projectId), eq(productionOrders.quotationId, quotationId)));
+    }
+
+    res.json(await getHydratedQuotationById(quotationId));
+  },
+);
 
 export default router;

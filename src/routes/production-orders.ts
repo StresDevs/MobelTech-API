@@ -30,6 +30,11 @@ const progressSchema = z.object({
 
 const PRODUCTION_PHASES = ['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado'] as const;
 
+function parseDateOnly(value: string) {
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 async function hydrateProductionOrder(order: typeof productionOrders.$inferSelect) {
   const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, order.id));
   const schedulePhases = await db
@@ -80,6 +85,21 @@ router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => 
   if (!order) {
     res.status(404).json({ error: 'Production order not found' });
     return;
+  }
+
+  for (const phase of phases as Array<z.infer<typeof schedulePhaseSchema>>) {
+    const start = parseDateOnly(phase.startDate);
+    const end = parseDateOnly(phase.endDate);
+
+    if (!start || !end) {
+      res.status(400).json({ error: 'Cada fase debe tener fechas validas.' });
+      return;
+    }
+
+    if (end.getTime() < start.getTime()) {
+      res.status(400).json({ error: 'La fecha final de una fase no puede ser anterior a su inicio.' });
+      return;
+    }
   }
 
   await db
