@@ -22,8 +22,13 @@ const router = Router();
 
 const planLineSchema = z.object({
   id: z.string().uuid().optional(),
-  phaseKey: z.string().min(1).max(40),
+  phaseKey: z.string().min(1).max(60),
   phaseLabel: z.string().min(1).max(120),
+  unit: z.string().min(1).max(30).optional(),
+  width: z.union([z.number(), z.string()]).optional().default(0),
+  heightQuantity: z.union([z.number(), z.string()]).optional().default(0),
+  measuredTotal: z.union([z.number(), z.string()]).optional(),
+  unitPrice: z.union([z.number(), z.string()]).optional(),
   plannedAmount: z.union([z.number(), z.string()]).optional().default(0),
   sortOrder: z.number().int().optional().default(0),
 });
@@ -31,7 +36,9 @@ const planLineSchema = z.object({
 const laborCatalogItemSchema = z.object({
   itemKey: z.string().min(1).max(60),
   label: z.string().min(1).max(160),
-  defaultAmount: z.union([z.number(), z.string()]),
+  unit: z.string().min(1).max(30).optional().default('UND'),
+  defaultAmount: z.union([z.number(), z.string()]).optional(),
+  referencePrice: z.union([z.number(), z.string()]).optional(),
   active: z.enum(['true', 'false']).optional().default('true'),
   sortOrder: z.number().int().optional().default(0),
 });
@@ -78,10 +85,24 @@ function money(value: unknown) {
   return String(toNumber(value).toFixed(2));
 }
 
+function measurement(value: unknown) {
+  return String(toNumber(value).toFixed(3));
+}
+
+function calculateMeasuredTotal(width: unknown, heightQuantity: unknown, fallback?: unknown) {
+  const widthNumber = toNumber(width);
+  const heightQuantityNumber = toNumber(heightQuantity);
+  const calculated = widthNumber * heightQuantityNumber;
+  if (calculated > 0) return calculated;
+  return toNumber(fallback);
+}
+
 function normalizeLaborItem(row: typeof contractorLaborCatalogItems.$inferSelect) {
   return {
     ...row,
+    unit: row.unit || 'UND',
     defaultAmount: toNumber(row.defaultAmount),
+    referencePrice: toNumber(row.defaultAmount),
     active: row.active !== 'false',
   };
 }
@@ -198,6 +219,11 @@ async function hydratePlans(filters?: {
 
         return {
           ...line,
+          unit: line.unit || 'UND',
+          width: toNumber(line.width),
+          heightQuantity: toNumber(line.heightQuantity),
+          measuredTotal: toNumber(line.measuredTotal),
+          unitPrice: toNumber(line.unitPrice),
           plannedAmount,
           paidAmount: linePaidAmount,
           remainingAmount: Math.max(plannedAmount - linePaidAmount, 0),
@@ -265,12 +291,14 @@ router.get('/labor-items', async (req, res) => {
 
 router.post('/labor-items', validate(laborCatalogItemSchema), async (req, res) => {
   await ensureContractorFinanceSchema();
+  const referencePrice = req.body.referencePrice ?? req.body.defaultAmount ?? 0;
   const [created] = await db
     .insert(contractorLaborCatalogItems)
     .values({
       itemKey: req.body.itemKey.trim(),
       label: req.body.label.trim(),
-      defaultAmount: money(req.body.defaultAmount),
+      unit: (req.body.unit ?? 'UND').trim().toUpperCase(),
+      defaultAmount: money(referencePrice),
       active: req.body.active ?? 'true',
       sortOrder: req.body.sortOrder ?? 0,
     })
@@ -286,7 +314,10 @@ router.put('/labor-items/:id', validate(laborCatalogItemSchema.partial()), async
     .set({
       ...(req.body.itemKey !== undefined ? { itemKey: req.body.itemKey.trim() } : {}),
       ...(req.body.label !== undefined ? { label: req.body.label.trim() } : {}),
-      ...(req.body.defaultAmount !== undefined ? { defaultAmount: money(req.body.defaultAmount) } : {}),
+      ...(req.body.unit !== undefined ? { unit: req.body.unit.trim().toUpperCase() } : {}),
+      ...(req.body.defaultAmount !== undefined || req.body.referencePrice !== undefined
+        ? { defaultAmount: money(req.body.referencePrice ?? req.body.defaultAmount) }
+        : {}),
       ...(req.body.active !== undefined ? { active: req.body.active } : {}),
       ...(req.body.sortOrder !== undefined ? { sortOrder: req.body.sortOrder } : {}),
       updatedAt: new Date(),
@@ -376,6 +407,15 @@ router.post('/plans', validate(planSchema), async (req, res) => {
     .from(contractorPaymentPlanLines)
     .where(eq(contractorPaymentPlanLines.planId, plan.id));
 
+  const requestedKeys = req.body.lines.map((line: z.infer<typeof planLineSchema>) => line.phaseKey);
+  const catalogRows = requestedKeys.length
+    ? await db
+        .select()
+        .from(contractorLaborCatalogItems)
+        .where(inArray(contractorLaborCatalogItems.itemKey, requestedKeys))
+    : [];
+  const catalogByKey = new Map(catalogRows.map((item) => [item.itemKey, item]));
+
   const plannedKeptLineIds = new Set(
     req.body.lines
       .map((line: z.infer<typeof planLineSchema>) => {
@@ -401,10 +441,23 @@ router.post('/plans', validate(planSchema), async (req, res) => {
 
   for (const [index, line] of req.body.lines.entries() as IterableIterator<[number, z.infer<typeof planLineSchema>]>) {
     const existingLine = currentLines.find((entry) => entry.id === line.id || entry.phaseKey === line.phaseKey);
+    const catalogItem = catalogByKey.get(line.phaseKey);
+    const unitPrice = catalogItem ? toNumber(catalogItem.defaultAmount) : toNumber(line.unitPrice);
+    const width = toNumber(line.width);
+    const heightQuantity = toNumber(line.heightQuantity);
+    const measuredTotal = calculateMeasuredTotal(width, heightQuantity, line.measuredTotal);
+    const plannedAmount = measuredTotal > 0 && unitPrice > 0
+      ? measuredTotal * unitPrice
+      : toNumber(line.plannedAmount);
     const lineValues = {
       phaseKey: line.phaseKey,
-      phaseLabel: line.phaseLabel,
-      plannedAmount: money(line.plannedAmount),
+      phaseLabel: catalogItem?.label ?? line.phaseLabel,
+      unit: catalogItem?.unit ?? line.unit ?? 'UND',
+      width: measurement(width),
+      heightQuantity: measurement(heightQuantity),
+      measuredTotal: measurement(measuredTotal),
+      unitPrice: money(unitPrice),
+      plannedAmount: money(plannedAmount),
       sortOrder: line.sortOrder ?? index,
       updatedAt: new Date(),
     };
