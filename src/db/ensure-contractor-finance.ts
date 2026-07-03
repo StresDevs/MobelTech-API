@@ -18,6 +18,7 @@ export function ensureContractorFinanceSchema() {
           total_amount numeric(12, 2) NOT NULL DEFAULT 0,
           review_status varchar(40) NOT NULL DEFAULT 'submitted',
           review_notes text,
+          estimated_schedule jsonb,
           created_at timestamptz NOT NULL DEFAULT now(),
           updated_at timestamptz NOT NULL DEFAULT now(),
           CONSTRAINT contractor_payment_plans_unique_job UNIQUE (contractor_id, production_order_id)
@@ -27,7 +28,8 @@ export function ensureContractorFinanceSchema() {
       await sql`
         ALTER TABLE contractor_payment_plans
           ADD COLUMN IF NOT EXISTS review_status varchar(40) NOT NULL DEFAULT 'submitted',
-          ADD COLUMN IF NOT EXISTS review_notes text
+          ADD COLUMN IF NOT EXISTS review_notes text,
+          ADD COLUMN IF NOT EXISTS estimated_schedule jsonb
       `;
 
       await sql`
@@ -39,6 +41,8 @@ export function ensureContractorFinanceSchema() {
           unit varchar(30) NOT NULL DEFAULT 'UND',
           width numeric(12, 3) NOT NULL DEFAULT 0,
           height_quantity numeric(12, 3) NOT NULL DEFAULT 0,
+          enable_height boolean NOT NULL DEFAULT true,
+          enable_width_quantity boolean NOT NULL DEFAULT true,
           measured_total numeric(12, 3) NOT NULL DEFAULT 0,
           unit_price numeric(12, 2) NOT NULL DEFAULT 0,
           planned_amount numeric(12, 2) NOT NULL DEFAULT 0,
@@ -54,6 +58,8 @@ export function ensureContractorFinanceSchema() {
           ADD COLUMN IF NOT EXISTS unit varchar(30) NOT NULL DEFAULT 'UND',
           ADD COLUMN IF NOT EXISTS width numeric(12, 3) NOT NULL DEFAULT 0,
           ADD COLUMN IF NOT EXISTS height_quantity numeric(12, 3) NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS enable_height boolean NOT NULL DEFAULT true,
+          ADD COLUMN IF NOT EXISTS enable_width_quantity boolean NOT NULL DEFAULT true,
           ADD COLUMN IF NOT EXISTS measured_total numeric(12, 3) NOT NULL DEFAULT 0,
           ADD COLUMN IF NOT EXISTS unit_price numeric(12, 2) NOT NULL DEFAULT 0
       `;
@@ -65,6 +71,8 @@ export function ensureContractorFinanceSchema() {
           label varchar(160) NOT NULL,
           unit varchar(30) NOT NULL DEFAULT 'UND',
           default_amount numeric(12, 2) NOT NULL DEFAULT 0,
+          enable_height boolean NOT NULL DEFAULT true,
+          enable_width_quantity boolean NOT NULL DEFAULT true,
           active varchar(5) NOT NULL DEFAULT 'true',
           sort_order integer NOT NULL DEFAULT 0,
           created_at timestamptz NOT NULL DEFAULT now(),
@@ -78,6 +86,8 @@ export function ensureContractorFinanceSchema() {
           ADD COLUMN IF NOT EXISTS label varchar(160),
           ADD COLUMN IF NOT EXISTS unit varchar(30) NOT NULL DEFAULT 'UND',
           ADD COLUMN IF NOT EXISTS default_amount numeric(12, 2) NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS enable_height boolean NOT NULL DEFAULT true,
+          ADD COLUMN IF NOT EXISTS enable_width_quantity boolean NOT NULL DEFAULT true,
           ADD COLUMN IF NOT EXISTS active varchar(5) NOT NULL DEFAULT 'true',
           ADD COLUMN IF NOT EXISTS sort_order integer NOT NULL DEFAULT 0,
           ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),

@@ -20,6 +20,19 @@ import { ensureContractorFinanceSchema } from '../db/ensure-contractor-finance';
 
 const router = Router();
 
+const boolishSchema = z.union([z.boolean(), z.string()]).optional().transform((value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value !== 'false';
+  return true;
+});
+
+const estimatedScheduleSchema = z.array(z.object({
+  phaseKey: z.string().min(1).max(60),
+  phaseLabel: z.string().min(1).max(120),
+  startDate: z.string().min(1),
+  endDate: z.string().min(1),
+})).min(1, 'Completa el cronograma estimado antes de enviar la solicitud.');
+
 const planLineSchema = z.object({
   id: z.string().uuid().optional(),
   phaseKey: z.string().min(1).max(60),
@@ -27,6 +40,8 @@ const planLineSchema = z.object({
   unit: z.string().min(1).max(30).optional(),
   width: z.union([z.number(), z.string()]).optional().default(0),
   heightQuantity: z.union([z.number(), z.string()]).optional().default(0),
+  enableHeight: boolishSchema,
+  enableWidthQuantity: boolishSchema,
   measuredTotal: z.union([z.number(), z.string()]).optional(),
   unitPrice: z.union([z.number(), z.string()]).optional(),
   plannedAmount: z.union([z.number(), z.string()]).optional().default(0),
@@ -39,6 +54,8 @@ const laborCatalogItemSchema = z.object({
   unit: z.string().min(1).max(30).optional().default('UND'),
   defaultAmount: z.union([z.number(), z.string()]).optional(),
   referencePrice: z.union([z.number(), z.string()]).optional(),
+  enableHeight: boolishSchema,
+  enableWidthQuantity: boolishSchema,
   active: z.enum(['true', 'false']).optional().default('true'),
   sortOrder: z.number().int().optional().default(0),
 });
@@ -48,6 +65,7 @@ const planSchema = z.object({
   productionOrderId: z.string().uuid(),
   totalAmount: z.union([z.number(), z.string()]),
   lines: z.array(planLineSchema).min(1),
+  estimatedSchedule: estimatedScheduleSchema,
 });
 
 const paymentSchema = z.object({
@@ -89,12 +107,44 @@ function measurement(value: unknown) {
   return String(toNumber(value).toFixed(3));
 }
 
-function calculateMeasuredTotal(width: unknown, heightQuantity: unknown, fallback?: unknown) {
+function calculateMeasuredTotal(width: unknown, heightQuantity: unknown, enableHeight: boolean, enableWidthQuantity: boolean, fallback?: unknown) {
   const widthNumber = toNumber(width);
   const heightQuantityNumber = toNumber(heightQuantity);
-  const calculated = widthNumber * heightQuantityNumber;
+  const calculated = (enableHeight ? widthNumber : 1) * (enableWidthQuantity ? heightQuantityNumber : 1);
   if (calculated > 0) return calculated;
   return toNumber(fallback);
+}
+
+function normalizeEstimatedSchedule(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const schedule = entry as { phaseKey?: unknown; phaseLabel?: unknown; startDate?: unknown; endDate?: unknown };
+      return {
+        phaseKey: String(schedule.phaseKey ?? ''),
+        phaseLabel: String(schedule.phaseLabel ?? ''),
+        startDate: String(schedule.startDate ?? ''),
+        endDate: String(schedule.endDate ?? ''),
+      };
+    })
+    .filter((entry): entry is { phaseKey: string; phaseLabel: string; startDate: string; endDate: string } => (
+      Boolean(entry?.phaseKey && entry.phaseLabel && entry.startDate && entry.endDate)
+    ));
+}
+
+function validateEstimatedSchedule(schedule: Array<{ phaseKey: string; phaseLabel: string; startDate: string; endDate: string }>) {
+  for (const phase of schedule) {
+    const startDate = new Date(`${phase.startDate}T00:00:00`);
+    const endDate = new Date(`${phase.endDate}T00:00:00`);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+      return 'El cronograma tiene fechas inválidas.';
+    }
+    if (endDate < startDate) {
+      return `La etapa "${phase.phaseLabel}" no puede terminar antes de iniciar.`;
+    }
+  }
+  return null;
 }
 
 function normalizeLaborItem(row: typeof contractorLaborCatalogItems.$inferSelect) {
@@ -103,6 +153,8 @@ function normalizeLaborItem(row: typeof contractorLaborCatalogItems.$inferSelect
     unit: row.unit || 'UND',
     defaultAmount: toNumber(row.defaultAmount),
     referencePrice: toNumber(row.defaultAmount),
+    enableHeight: row.enableHeight,
+    enableWidthQuantity: row.enableWidthQuantity,
     active: row.active !== 'false',
   };
 }
@@ -164,6 +216,7 @@ async function hydratePlans(filters?: {
       totalAmount: contractorPaymentPlans.totalAmount,
       reviewStatus: contractorPaymentPlans.reviewStatus,
       reviewNotes: contractorPaymentPlans.reviewNotes,
+      estimatedSchedule: contractorPaymentPlans.estimatedSchedule,
       createdAt: contractorPaymentPlans.createdAt,
       updatedAt: contractorPaymentPlans.updatedAt,
       contractorName: contractors.name,
@@ -210,6 +263,7 @@ async function hydratePlans(filters?: {
       totalAmount,
       reviewStatus: row.reviewStatus,
       reviewNotes: row.reviewNotes,
+      estimatedSchedule: normalizeEstimatedSchedule(row.estimatedSchedule),
       paidAmount,
       remainingAmount: Math.max(totalAmount - paidAmount, 0),
       lines: planLines.map((line) => {
@@ -222,6 +276,8 @@ async function hydratePlans(filters?: {
           unit: line.unit || 'UND',
           width: toNumber(line.width),
           heightQuantity: toNumber(line.heightQuantity),
+          enableHeight: line.enableHeight,
+          enableWidthQuantity: line.enableWidthQuantity,
           measuredTotal: toNumber(line.measuredTotal),
           unitPrice: toNumber(line.unitPrice),
           plannedAmount,
@@ -299,6 +355,8 @@ router.post('/labor-items', validate(laborCatalogItemSchema), async (req, res) =
       label: req.body.label.trim(),
       unit: (req.body.unit ?? 'UND').trim().toUpperCase(),
       defaultAmount: money(referencePrice),
+      enableHeight: req.body.enableHeight ?? true,
+      enableWidthQuantity: req.body.enableWidthQuantity ?? true,
       active: req.body.active ?? 'true',
       sortOrder: req.body.sortOrder ?? 0,
     })
@@ -318,6 +376,8 @@ router.put('/labor-items/:id', validate(laborCatalogItemSchema.partial()), async
       ...(req.body.defaultAmount !== undefined || req.body.referencePrice !== undefined
         ? { defaultAmount: money(req.body.referencePrice ?? req.body.defaultAmount) }
         : {}),
+      ...(req.body.enableHeight !== undefined ? { enableHeight: req.body.enableHeight } : {}),
+      ...(req.body.enableWidthQuantity !== undefined ? { enableWidthQuantity: req.body.enableWidthQuantity } : {}),
       ...(req.body.active !== undefined ? { active: req.body.active } : {}),
       ...(req.body.sortOrder !== undefined ? { sortOrder: req.body.sortOrder } : {}),
       updatedAt: new Date(),
@@ -349,6 +409,16 @@ router.post('/plans', validate(planSchema), async (req, res) => {
   const totalAmount = toNumber(req.body.totalAmount);
   if (totalAmount <= 0) {
     res.status(400).json({ error: 'El monto total debe ser mayor a 0' });
+    return;
+  }
+  const schedule = normalizeEstimatedSchedule(req.body.estimatedSchedule);
+  if (schedule.length === 0) {
+    res.status(400).json({ error: 'Completa el cronograma estimado antes de enviar la solicitud.' });
+    return;
+  }
+  const scheduleError = validateEstimatedSchedule(schedule);
+  if (scheduleError) {
+    res.status(400).json({ error: scheduleError });
     return;
   }
 
@@ -388,7 +458,13 @@ router.post('/plans', validate(planSchema), async (req, res) => {
   const [plan] = existing
     ? await db
         .update(contractorPaymentPlans)
-        .set({ totalAmount: money(totalAmount), reviewStatus: 'submitted', reviewNotes: null, updatedAt: new Date() })
+        .set({
+          totalAmount: money(totalAmount),
+          estimatedSchedule: schedule,
+          reviewStatus: 'submitted',
+          reviewNotes: null,
+          updatedAt: new Date(),
+        })
         .where(eq(contractorPaymentPlans.id, existing.id))
         .returning()
     : await db
@@ -397,6 +473,7 @@ router.post('/plans', validate(planSchema), async (req, res) => {
           contractorId: req.body.contractorId,
           productionOrderId: req.body.productionOrderId,
           totalAmount: money(totalAmount),
+          estimatedSchedule: schedule,
           reviewStatus: 'submitted',
           reviewNotes: null,
         })
@@ -443,9 +520,11 @@ router.post('/plans', validate(planSchema), async (req, res) => {
     const existingLine = currentLines.find((entry) => entry.id === line.id || entry.phaseKey === line.phaseKey);
     const catalogItem = catalogByKey.get(line.phaseKey);
     const unitPrice = catalogItem ? toNumber(catalogItem.defaultAmount) : toNumber(line.unitPrice);
-    const width = toNumber(line.width);
-    const heightQuantity = toNumber(line.heightQuantity);
-    const measuredTotal = calculateMeasuredTotal(width, heightQuantity, line.measuredTotal);
+    const enableHeight = catalogItem ? catalogItem.enableHeight : line.enableHeight;
+    const enableWidthQuantity = catalogItem ? catalogItem.enableWidthQuantity : line.enableWidthQuantity;
+    const width = enableHeight ? toNumber(line.width) : 0;
+    const heightQuantity = enableWidthQuantity ? toNumber(line.heightQuantity) : 0;
+    const measuredTotal = calculateMeasuredTotal(width, heightQuantity, enableHeight, enableWidthQuantity, line.measuredTotal);
     const plannedAmount = measuredTotal > 0 && unitPrice > 0
       ? measuredTotal * unitPrice
       : toNumber(line.plannedAmount);
@@ -455,6 +534,8 @@ router.post('/plans', validate(planSchema), async (req, res) => {
       unit: catalogItem?.unit ?? line.unit ?? 'UND',
       width: measurement(width),
       heightQuantity: measurement(heightQuantity),
+      enableHeight,
+      enableWidthQuantity,
       measuredTotal: measurement(measuredTotal),
       unitPrice: money(unitPrice),
       plannedAmount: money(plannedAmount),
