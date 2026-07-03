@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
-import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { validate } from '../middleware/validate';
 import { db } from '../db';
@@ -12,6 +12,7 @@ import { ensureQuotationWorkflowSchema } from '../db/ensure-quotation-workflow';
 const router = Router();
 
 const prequotationVersionSchema = z.object({
+  version: z.number().int().min(1).optional(),
   fileName: z.string().min(1),
   fileType: z.enum(['pdf', 'excel']),
   fileSize: z.string().min(1),
@@ -79,7 +80,7 @@ async function hydratePrequotationRow(prequotation: typeof prequotations.$inferS
     .select()
     .from(prequotationVersions)
     .where(eq(prequotationVersions.prequotationId, prequotation.id))
-    .orderBy(desc(prequotationVersions.version));
+    .orderBy(asc(prequotationVersions.version));
 
   const logs = await db
     .select()
