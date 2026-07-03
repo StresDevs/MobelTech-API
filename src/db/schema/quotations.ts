@@ -44,3 +44,16 @@ export const quotationItems = pgTable('quotation_items', {
   dimensions: varchar('dimensions', { length: 100 }),
   notes: text('notes'),
 });
+
+export const quotationAuditLogs = pgTable('quotation_audit_logs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  quotationId: uuid('quotation_id')
+    .notNull()
+    .references(() => quotations.id, { onDelete: 'cascade' }),
+  field: varchar('field', { length: 120 }).notNull(),
+  previousValue: text('previous_value').notNull(),
+  nextValue: text('next_value').notNull(),
+  comment: text('comment'),
+  changedBy: varchar('changed_by', { length: 255 }).notNull(),
+  changedAt: timestamp('changed_at', { withTimezone: true }).notNull().defaultNow(),
+});

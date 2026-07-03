@@ -12,6 +12,7 @@ import {
   projects,
   prequotations,
   productionOrders,
+  quotationAuditLogs,
   quotationItems,
   quotations,
 } from '../db/schema';
@@ -37,6 +38,8 @@ const updateQuotationSchema = z.object({
   advanceAmount: z.union([z.number(), z.string()]).optional(),
   notes: z.string().optional().nullable(),
   items: z.array(quotationItemSchema).optional(),
+  adjustmentComment: z.string().trim().max(1000).optional(),
+  changedBy: z.string().trim().min(1).max(255).optional(),
 });
 
 const optionalNullableTextSchema = z.preprocess((value) => {
@@ -105,7 +108,7 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
 
   const quotationIds = rows.map((row) => row.id);
 
-  const [itemRows, linkedPrequotations, productionOrderRows, environmentRows] = await Promise.all([
+  const [itemRows, linkedPrequotations, productionOrderRows, environmentRows, auditRows] = await Promise.all([
     db
       .select()
       .from(quotationItems)
@@ -146,6 +149,11 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
       })
       .from(projectEnvironments)
       .where(inArray(projectEnvironments.quotationId, quotationIds)),
+    db
+      .select()
+      .from(quotationAuditLogs)
+      .where(inArray(quotationAuditLogs.quotationId, quotationIds))
+      .orderBy(desc(quotationAuditLogs.changedAt)),
   ]);
 
   const contractorIds = Array.from(
@@ -199,6 +207,13 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
     environmentsByQuotationId.set(row.quotationId, current);
   });
 
+  const auditLogsByQuotationId = new Map<string, typeof auditRows>();
+  auditRows.forEach((row) => {
+    const current = auditLogsByQuotationId.get(row.quotationId) ?? [];
+    current.push(row);
+    auditLogsByQuotationId.set(row.quotationId, current);
+  });
+
   return rows.map((row) => {
     const quotationItemsForRow = (itemsByQuotationId.get(row.id) ?? []).map((item) => ({
       id: item.id,
@@ -246,7 +261,15 @@ async function hydrateQuotationRows(rows: Array<QuotationRow & { clientName?: st
       createdDate: row.createdAt,
       updatedAt: row.updatedAt,
       items: quotationItemsForRow,
-      auditLogs: [],
+      auditLogs: (auditLogsByQuotationId.get(row.id) ?? []).map((audit) => ({
+        id: audit.id,
+        field: audit.field,
+        previousValue: audit.previousValue,
+        nextValue: audit.nextValue,
+        comment: audit.comment ?? null,
+        changedBy: audit.changedBy,
+        changedAt: audit.changedAt,
+      })),
       clientName: row.clientName ?? null,
       assignedContractors,
       environmentProjects,
@@ -354,12 +377,31 @@ router.get('/:id', async (req: Request, res: Response) => {
 router.put('/:id', validate(updateQuotationSchema), async (req: Request, res: Response) => {
   await ensureQuotationWorkflowSchema();
   const id = req.params.id as string;
-  const { items, totalAmount, advanceAmount, ...data } = req.body;
+  const { items, totalAmount, advanceAmount, adjustmentComment, changedBy, ...data } = req.body;
 
-  const [current] = await db.select({ id: quotations.id }).from(quotations).where(eq(quotations.id, id));
+  const [current] = await db.select().from(quotations).where(eq(quotations.id, id));
   if (!current) {
     res.status(404).json({ error: 'Quotation not found' });
     return;
+  }
+
+  const previousTotal = Number(current.totalAmount ?? 0);
+  const nextTotal = totalAmount !== undefined ? Number(totalAmount) : previousTotal;
+  if (totalAmount !== undefined && (!Number.isFinite(nextTotal) || nextTotal < 0)) {
+    res.status(400).json({ error: 'totalAmount must be a valid amount greater than or equal to zero' });
+    return;
+  }
+
+  if (totalAmount !== undefined) {
+    const environmentTotal = await getEnvironmentClientPriceTotal(id);
+    if (nextTotal < environmentTotal) {
+      res.status(400).json({
+        error: `El monto cotizado no puede ser menor a lo ya asignado a ambientes (${environmentTotal.toFixed(2)} Bs).`,
+        total: nextTotal,
+        environmentTotal,
+      });
+      return;
+    }
   }
 
   await db
@@ -385,6 +427,33 @@ router.put('/:id', validate(updateQuotationSchema), async (req: Request, res: Re
           notes: item.notes ?? null,
         })),
       );
+    }
+  }
+
+  if (totalAmount !== undefined && previousTotal !== nextTotal) {
+    const comment = typeof adjustmentComment === 'string' && adjustmentComment.trim()
+      ? adjustmentComment.trim()
+      : null;
+
+    await db.insert(quotationAuditLogs).values({
+      quotationId: id,
+      field: 'totalAmount',
+      previousValue: String(previousTotal),
+      nextValue: String(nextTotal),
+      comment: comment ?? null,
+      changedBy: typeof changedBy === 'string' && changedBy.trim() ? changedBy.trim() : 'Sistema',
+    });
+
+    if (comment) {
+      const existingNotes = typeof data.notes === 'string' ? data.notes.trim() : current.notes?.trim();
+      const noteLine = `Comentario de reajuste: ${comment}`;
+      await db
+        .update(quotations)
+        .set({
+          notes: existingNotes ? `${existingNotes}\n\n${noteLine}` : noteLine,
+          updatedAt: new Date(),
+        })
+        .where(eq(quotations.id, id));
     }
   }
 

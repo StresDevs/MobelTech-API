@@ -5,7 +5,7 @@ export { clients, clientStatusEnum } from './clients';
 export { measurements, measurementStatusEnum } from './measurements';
 export { projects, projectStatusEnum } from './projects';
 export { projectEnvironments } from './project-environments';
-export { quotations, quotationItems, quotationStatusEnum } from './quotations';
+export { quotations, quotationItems, quotationAuditLogs, quotationStatusEnum } from './quotations';
 export {
   prequotations,
   prequotationVersions,
