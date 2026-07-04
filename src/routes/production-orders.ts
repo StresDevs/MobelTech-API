@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import { randomUUID } from 'crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
-import { productionItems, productionItemPhases, productionOrders, productionSchedulePhases } from '../db/schema';
+import { productionItems, productionItemPhases, productionOrders, productionPhaseMachines, productionSchedulePhases } from '../db/schema';
 import { validate } from '../middleware/validate';
 import { ensureProductionSchema } from '../db/ensure-production-schema';
 
@@ -13,7 +13,7 @@ const schedulePhaseSchema = z.object({
   phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
   startDate: z.string().min(1),
   endDate: z.string().min(1),
-  cuttingMachine: z.enum(['cortadora-1', 'cortadora-2']).optional().nullable(),
+  cuttingMachine: z.string().max(80).optional().nullable(),
 });
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -28,11 +28,25 @@ const progressSchema = z.object({
   phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
 });
 
+const phaseMachineSchema = z.object({
+  phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
+  name: z.string().min(1).max(80),
+  active: z.enum(['true', 'false']).optional().default('true'),
+  sortOrder: z.number().int().optional().default(0),
+});
+
 const PRODUCTION_PHASES = ['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado'] as const;
 
 function parseDateOnly(value: string) {
   const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function normalizePhaseMachine(row: typeof productionPhaseMachines.$inferSelect) {
+  return {
+    ...row,
+    active: row.active !== 'false',
+  };
 }
 
 async function hydrateProductionOrder(order: typeof productionOrders.$inferSelect) {
@@ -64,6 +78,55 @@ router.get('/', async (req, res) => {
   res.json(hydrated.filter(Boolean));
 });
 
+router.get('/phase-machines', async (req, res) => {
+  await ensureProductionSchema();
+  const activeOnly = req.query.activeOnly !== 'false';
+  const rows = await db
+    .select()
+    .from(productionPhaseMachines)
+    .where(activeOnly ? eq(productionPhaseMachines.active, 'true') : undefined)
+    .orderBy(asc(productionPhaseMachines.phase), asc(productionPhaseMachines.sortOrder), asc(productionPhaseMachines.name));
+
+  res.json(rows.map(normalizePhaseMachine));
+});
+
+router.post('/phase-machines', validate(phaseMachineSchema), async (req, res) => {
+  await ensureProductionSchema();
+  const [created] = await db
+    .insert(productionPhaseMachines)
+    .values({
+      phase: req.body.phase,
+      name: req.body.name.trim(),
+      active: req.body.active ?? 'true',
+      sortOrder: req.body.sortOrder ?? 0,
+    })
+    .returning();
+
+  res.status(201).json(normalizePhaseMachine(created));
+});
+
+router.put('/phase-machines/:id', validate(phaseMachineSchema.partial()), async (req, res) => {
+  await ensureProductionSchema();
+  const [updated] = await db
+    .update(productionPhaseMachines)
+    .set({
+      ...(req.body.phase !== undefined ? { phase: req.body.phase } : {}),
+      ...(req.body.name !== undefined ? { name: req.body.name.trim() } : {}),
+      ...(req.body.active !== undefined ? { active: req.body.active } : {}),
+      ...(req.body.sortOrder !== undefined ? { sortOrder: req.body.sortOrder } : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(productionPhaseMachines.id, req.params.id as string))
+    .returning();
+
+  if (!updated) {
+    res.status(404).json({ error: 'Máquina de fase no encontrada' });
+    return;
+  }
+
+  res.json(normalizePhaseMachine(updated));
+});
+
 router.get('/:id', async (req, res) => {
   await ensureProductionSchema();
   const [row] = await db.select().from(productionOrders).where(eq(productionOrders.id, req.params.id as string));
@@ -87,6 +150,13 @@ router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => 
     return;
   }
 
+  const tentativeStart = parseDateOnly(String(order.startDate));
+  const tentativeEnd = parseDateOnly(String(order.estimatedDeliveryDate));
+  const machineRows = await db
+    .select()
+    .from(productionPhaseMachines)
+    .where(eq(productionPhaseMachines.active, 'true'));
+
   for (const phase of phases as Array<z.infer<typeof schedulePhaseSchema>>) {
     const start = parseDateOnly(phase.startDate);
     const end = parseDateOnly(phase.endDate);
@@ -99,6 +169,29 @@ router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => 
     if (end.getTime() < start.getTime()) {
       res.status(400).json({ error: 'La fecha final de una fase no puede ser anterior a su inicio.' });
       return;
+    }
+
+    if (type === 'actual' && tentativeStart && tentativeEnd && (start < tentativeStart || end > tentativeEnd)) {
+      res.status(400).json({
+        error: `La fase ${phase.phase} debe estar dentro del cronograma tentativo (${order.startDate} - ${order.estimatedDeliveryDate}).`,
+      });
+      return;
+    }
+
+    const phaseMachines = machineRows.filter((machine) => machine.phase === phase.phase);
+    if (type === 'actual' && phaseMachines.length > 0) {
+      if (!phase.cuttingMachine) {
+        res.status(400).json({ error: `Selecciona una máquina para la fase ${phase.phase}.` });
+        return;
+      }
+      const selectedMachine = phaseMachines.find((machine) => (
+        machine.id === phase.cuttingMachine ||
+        machine.name.toLowerCase() === String(phase.cuttingMachine).toLowerCase()
+      ));
+      if (!selectedMachine) {
+        res.status(400).json({ error: `La máquina seleccionada no pertenece a la fase ${phase.phase}.` });
+        return;
+      }
     }
   }
 
@@ -117,7 +210,7 @@ router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => 
       phase: phase.phase,
       startDate: phase.startDate,
       endDate: phase.endDate,
-      cuttingMachine: phase.phase === 'cortado' ? phase.cuttingMachine ?? null : null,
+      cuttingMachine: phase.cuttingMachine ?? null,
       createdBy: normalizedCreatedBy,
       updatedAt: new Date(),
     })),

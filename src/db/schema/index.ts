@@ -48,6 +48,7 @@ export {
   productionOrders,
   productionItems,
   productionItemPhases,
+  productionPhaseMachines,
   productionSchedulePhases,
   productionStatusEnum,
   productionPhaseEnum,

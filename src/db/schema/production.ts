@@ -78,8 +78,18 @@ export const productionSchedulePhases = pgTable('production_schedule_phases', {
   phase: productionPhaseEnum('phase').notNull(),
   startDate: date('start_date').notNull(),
   endDate: date('end_date').notNull(),
-  cuttingMachine: varchar('cutting_machine', { length: 20 }),
+  cuttingMachine: varchar('cutting_machine', { length: 80 }),
   createdBy: uuid('created_by'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const productionPhaseMachines = pgTable('production_phase_machines', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  phase: productionPhaseEnum('phase').notNull(),
+  name: varchar('name', { length: 80 }).notNull(),
+  active: varchar('active', { length: 5 }).notNull().default('true'),
+  sortOrder: integer('sort_order').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

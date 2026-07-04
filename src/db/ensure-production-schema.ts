@@ -91,7 +91,7 @@ export function ensureProductionSchema() {
           phase production_phase NOT NULL,
           start_date date NOT NULL,
           end_date date NOT NULL,
-          cutting_machine varchar(20),
+          cutting_machine varchar(80),
           created_by uuid,
           created_at timestamptz NOT NULL DEFAULT now(),
           updated_at timestamptz NOT NULL DEFAULT now()
@@ -135,10 +135,52 @@ export function ensureProductionSchema() {
           ADD COLUMN IF NOT EXISTS phase production_phase NOT NULL,
           ADD COLUMN IF NOT EXISTS start_date date NOT NULL DEFAULT CURRENT_DATE,
           ADD COLUMN IF NOT EXISTS end_date date NOT NULL DEFAULT CURRENT_DATE,
-          ADD COLUMN IF NOT EXISTS cutting_machine varchar(20),
+          ADD COLUMN IF NOT EXISTS cutting_machine varchar(80),
           ADD COLUMN IF NOT EXISTS created_by uuid,
           ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
           ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()
+      `;
+
+      await sql`
+        ALTER TABLE production_schedule_phases
+          ALTER COLUMN cutting_machine TYPE varchar(80)
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS production_phase_machines (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          phase production_phase NOT NULL,
+          name varchar(80) NOT NULL,
+          active varchar(5) NOT NULL DEFAULT 'true',
+          sort_order integer NOT NULL DEFAULT 0,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+      `;
+
+      await sql`
+        ALTER TABLE production_phase_machines
+          ADD COLUMN IF NOT EXISTS phase production_phase NOT NULL DEFAULT 'cortado',
+          ADD COLUMN IF NOT EXISTS name varchar(80) NOT NULL DEFAULT '',
+          ADD COLUMN IF NOT EXISTS active varchar(5) NOT NULL DEFAULT 'true',
+          ADD COLUMN IF NOT EXISTS sort_order integer NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now(),
+          ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now()
+      `;
+
+      await sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS production_phase_machines_phase_name_idx
+        ON production_phase_machines(phase, lower(name))
+      `;
+
+      await sql`
+        INSERT INTO production_phase_machines (phase, name, sort_order)
+        VALUES
+          ('cortado', 'Cortadora 1', 1),
+          ('cortado', 'Cortadora 2', 2),
+          ('canteado', 'Máquina 1', 1),
+          ('canteado', 'Máquina 2', 2)
+        ON CONFLICT DO NOTHING
       `;
 
       console.log('✅ Production schema is ready.');
