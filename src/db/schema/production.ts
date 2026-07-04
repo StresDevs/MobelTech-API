@@ -79,6 +79,7 @@ export const productionSchedulePhases = pgTable('production_schedule_phases', {
   phase: productionPhaseEnum('phase').notNull(),
   startDate: date('start_date').notNull(),
   endDate: date('end_date').notNull(),
+  completed: varchar('completed', { length: 5 }).notNull().default('false'),
   cuttingMachine: varchar('cutting_machine', { length: 80 }),
   createdBy: uuid('created_by'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

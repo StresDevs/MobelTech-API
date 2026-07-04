@@ -246,14 +246,39 @@ router.patch('/:id/real-progress', validate(realProgressSchema), async (req, res
     return;
   }
 
-  const [existingRealPhase] = await db
+  const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, orderId));
+  const itemPhaseRows = await Promise.all(
+    items.map((item) => db
+      .select()
+      .from(productionItemPhases)
+      .where(eq(productionItemPhases.productionItemId, item.id))),
+  );
+  const realPhases = await db
     .select()
     .from(productionSchedulePhases)
     .where(and(
       eq(productionSchedulePhases.productionOrderId, orderId),
       eq(productionSchedulePhases.type, 'real'),
-      eq(productionSchedulePhases.phase, phase),
     ));
+  const existingRealPhase = realPhases.find((entry) => entry.phase === phase);
+  const phaseIndex = PRODUCTION_PHASES.indexOf(phase);
+
+  const isPhaseCompleted = (phaseToCheck: typeof PRODUCTION_PHASES[number]) => {
+    const realPhase = realPhases.find((entry) => entry.phase === phaseToCheck);
+    if (realPhase?.completed === 'true') return true;
+    if (items.length === 0) return false;
+    return items.every((item, index) => itemPhaseRows[index]?.some((entry) => entry.phase === phaseToCheck && entry.completed === 'true'));
+  };
+
+  if (phaseIndex > 0 && !isPhaseCompleted(PRODUCTION_PHASES[phaseIndex - 1])) {
+    res.status(400).json({ error: `Primero debes finalizar la fase ${PRODUCTION_PHASES[phaseIndex - 1]}.` });
+    return;
+  }
+
+  if (action === 'finish' && !existingRealPhase) {
+    res.status(400).json({ error: 'Primero inicia esta fase antes de finalizarla.' });
+    return;
+  }
 
   if (existingRealPhase) {
     const currentEnd = parseDateOnly(String(existingRealPhase.endDate)) ?? progressDate;
@@ -272,6 +297,7 @@ router.patch('/:id/real-progress', validate(realProgressSchema), async (req, res
         endDate: action === 'finish'
           ? normalizedDate
           : (currentEnd.getTime() < progressDate.getTime() ? normalizedDate : String(existingRealPhase.endDate).slice(0, 10)),
+        completed: action === 'finish' ? 'true' : existingRealPhase.completed,
         createdBy: existingRealPhase.createdBy ?? normalizedCreatedBy,
         updatedAt: new Date(),
       })
@@ -284,16 +310,14 @@ router.patch('/:id/real-progress', validate(realProgressSchema), async (req, res
       phase,
       startDate: normalizedDate,
       endDate: normalizedDate,
+      completed: action === 'finish' ? 'true' : 'false',
       cuttingMachine: null,
       createdBy: normalizedCreatedBy,
       updatedAt: new Date(),
     });
   }
 
-  const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, orderId));
-
   if (action === 'finish') {
-    const phaseIndex = PRODUCTION_PHASES.indexOf(phase);
     const progress = Math.round(((phaseIndex + 1) / PRODUCTION_PHASES.length) * 100);
 
     for (const item of items) {
@@ -323,6 +347,17 @@ router.patch('/:id/real-progress', validate(realProgressSchema), async (req, res
           completedDate: new Date(`${normalizedDate}T00:00:00`),
         });
       }
+    }
+
+    for (const laterPhase of PRODUCTION_PHASES.slice(phaseIndex + 1)) {
+      await db
+        .delete(productionSchedulePhases)
+        .where(and(
+          eq(productionSchedulePhases.productionOrderId, orderId),
+          eq(productionSchedulePhases.type, 'real'),
+          eq(productionSchedulePhases.phase, laterPhase),
+          eq(productionSchedulePhases.completed, 'false'),
+        ));
     }
   }
 
