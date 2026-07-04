@@ -301,13 +301,28 @@ router.patch('/:id/real-progress', validate(realProgressSchema), async (req, res
         progress: Math.max(Number(item.progress || 0), progress),
       }).where(eq(productionItems.id, item.id));
 
-      await db.update(productionItemPhases).set({
-        completed: 'true',
-        completedDate: new Date(`${normalizedDate}T00:00:00`),
-      }).where(and(
-        eq(productionItemPhases.productionItemId, item.id),
-        eq(productionItemPhases.phase, phase),
-      ));
+      const [existingItemPhase] = await db
+        .select()
+        .from(productionItemPhases)
+        .where(and(
+          eq(productionItemPhases.productionItemId, item.id),
+          eq(productionItemPhases.phase, phase),
+        ));
+
+      if (existingItemPhase) {
+        await db.update(productionItemPhases).set({
+          completed: 'true',
+          completedDate: new Date(`${normalizedDate}T00:00:00`),
+        }).where(eq(productionItemPhases.id, existingItemPhase.id));
+      } else {
+        await db.insert(productionItemPhases).values({
+          id: randomUUID(),
+          productionItemId: item.id,
+          phase,
+          completed: 'true',
+          completedDate: new Date(`${normalizedDate}T00:00:00`),
+        });
+      }
     }
   }
 
