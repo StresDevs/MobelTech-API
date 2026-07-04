@@ -31,6 +31,7 @@ export const productionPhaseEnum = pgEnum('production_phase', [
 export const productionScheduleTypeEnum = pgEnum('production_schedule_type', [
   'tentative',
   'actual',
+  'real',
 ]);
 
 export const productionOrders = pgTable('production_orders', {

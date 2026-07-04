@@ -28,6 +28,13 @@ const progressSchema = z.object({
   phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
 });
 
+const realProgressSchema = z.object({
+  phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
+  action: z.enum(['start', 'finish']),
+  date: z.string().min(1),
+  createdBy: z.string().optional().nullable(),
+});
+
 const phaseMachineSchema = z.object({
   phase: z.enum(['cortado', 'canteado', 'ensamblado', 'instalacion', 'entregado']),
   name: z.string().min(1).max(80),
@@ -217,6 +224,100 @@ router.put('/:id/schedule', validate(updateScheduleSchema), async (req, res) => 
   );
 
   const hydrated = await hydrateProductionOrder(order);
+  res.json(hydrated);
+});
+
+router.patch('/:id/real-progress', validate(realProgressSchema), async (req, res) => {
+  await ensureProductionSchema();
+  const orderId = req.params.id as string;
+  const { phase, action, date, createdBy } = req.body;
+  const normalizedCreatedBy = createdBy && UUID_REGEX.test(createdBy) ? createdBy : null;
+  const progressDate = parseDateOnly(date);
+
+  if (!progressDate) {
+    res.status(400).json({ error: 'La fecha del avance real no es valida.' });
+    return;
+  }
+
+  const normalizedDate = date.slice(0, 10);
+  const [order] = await db.select().from(productionOrders).where(eq(productionOrders.id, orderId));
+  if (!order) {
+    res.status(404).json({ error: 'Production order not found' });
+    return;
+  }
+
+  const [existingRealPhase] = await db
+    .select()
+    .from(productionSchedulePhases)
+    .where(and(
+      eq(productionSchedulePhases.productionOrderId, orderId),
+      eq(productionSchedulePhases.type, 'real'),
+      eq(productionSchedulePhases.phase, phase),
+    ));
+
+  if (existingRealPhase) {
+    const currentEnd = parseDateOnly(String(existingRealPhase.endDate)) ?? progressDate;
+    const nextStartDate = action === 'start' ? normalizedDate : String(existingRealPhase.startDate).slice(0, 10);
+    const nextStart = parseDateOnly(nextStartDate) ?? progressDate;
+
+    if (action === 'finish' && progressDate.getTime() < nextStart.getTime()) {
+      res.status(400).json({ error: 'La fecha de finalizacion no puede ser anterior al inicio real de la fase.' });
+      return;
+    }
+
+    await db
+      .update(productionSchedulePhases)
+      .set({
+        startDate: nextStartDate,
+        endDate: action === 'finish'
+          ? normalizedDate
+          : (currentEnd.getTime() < progressDate.getTime() ? normalizedDate : String(existingRealPhase.endDate).slice(0, 10)),
+        createdBy: existingRealPhase.createdBy ?? normalizedCreatedBy,
+        updatedAt: new Date(),
+      })
+      .where(eq(productionSchedulePhases.id, existingRealPhase.id));
+  } else {
+    await db.insert(productionSchedulePhases).values({
+      id: randomUUID(),
+      productionOrderId: orderId,
+      type: 'real',
+      phase,
+      startDate: normalizedDate,
+      endDate: normalizedDate,
+      cuttingMachine: null,
+      createdBy: normalizedCreatedBy,
+      updatedAt: new Date(),
+    });
+  }
+
+  const items = await db.select().from(productionItems).where(eq(productionItems.productionOrderId, orderId));
+
+  if (action === 'finish') {
+    const phaseIndex = PRODUCTION_PHASES.indexOf(phase);
+    const progress = Math.round(((phaseIndex + 1) / PRODUCTION_PHASES.length) * 100);
+
+    for (const item of items) {
+      await db.update(productionItems).set({
+        progress: Math.max(Number(item.progress || 0), progress),
+      }).where(eq(productionItems.id, item.id));
+
+      await db.update(productionItemPhases).set({
+        completed: 'true',
+        completedDate: new Date(`${normalizedDate}T00:00:00`),
+      }).where(and(
+        eq(productionItemPhases.productionItemId, item.id),
+        eq(productionItemPhases.phase, phase),
+      ));
+    }
+  }
+
+  const [updatedOrder] = await db.update(productionOrders).set({
+    status: action === 'finish' && phase === 'entregado' ? 'completed' : 'in-progress',
+    actualDeliveryDate: action === 'finish' && phase === 'entregado' ? normalizedDate : order.actualDeliveryDate,
+    updatedAt: new Date(),
+  }).where(eq(productionOrders.id, orderId)).returning();
+
+  const hydrated = await hydrateProductionOrder(updatedOrder);
   res.json(hydrated);
 });
 

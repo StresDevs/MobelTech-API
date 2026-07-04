@@ -42,9 +42,13 @@ export function ensureProductionSchema() {
             FROM pg_type
             WHERE typname = 'production_schedule_type'
           ) THEN
-            CREATE TYPE production_schedule_type AS ENUM ('tentative', 'actual');
+            CREATE TYPE production_schedule_type AS ENUM ('tentative', 'actual', 'real');
           END IF;
         END $$;
+      `;
+
+      await sql`
+        ALTER TYPE production_schedule_type ADD VALUE IF NOT EXISTS 'real'
       `;
 
       await sql`
