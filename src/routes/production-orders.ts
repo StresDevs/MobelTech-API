@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { randomUUID } from 'crypto';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
 import { productionItems, productionItemPhases, productionOrders, productionPhaseMachines, productionSchedulePhases } from '../db/schema';
@@ -76,13 +76,58 @@ async function hydrateProductionOrder(order: typeof productionOrders.$inferSelec
   return { ...order, items: hydratedItems, schedulePhases };
 }
 
+async function hydrateProductionOrders(rows: Array<typeof productionOrders.$inferSelect>) {
+  if (rows.length === 0) return [];
+
+  const orderIds = rows.map((row) => row.id);
+  const [items, schedulePhases] = await Promise.all([
+    db.select().from(productionItems).where(inArray(productionItems.productionOrderId, orderIds)),
+    db.select().from(productionSchedulePhases).where(inArray(productionSchedulePhases.productionOrderId, orderIds)),
+  ]);
+
+  const itemIds = items.map((item) => item.id);
+  const phases = itemIds.length > 0
+    ? await db.select().from(productionItemPhases).where(inArray(productionItemPhases.productionItemId, itemIds))
+    : [];
+
+  const phasesByItemId = new Map<string, typeof phases>();
+  phases.forEach((phase) => {
+    const current = phasesByItemId.get(phase.productionItemId) ?? [];
+    current.push(phase);
+    phasesByItemId.set(phase.productionItemId, current);
+  });
+
+  const itemsByOrderId = new Map<string, Array<typeof items[number] & { phases: typeof phases }>>();
+  items.forEach((item) => {
+    const current = itemsByOrderId.get(item.productionOrderId) ?? [];
+    current.push({ ...item, phases: phasesByItemId.get(item.id) ?? [] });
+    itemsByOrderId.set(item.productionOrderId, current);
+  });
+
+  const scheduleByOrderId = new Map<string, typeof schedulePhases>();
+  schedulePhases.forEach((phase) => {
+    const current = scheduleByOrderId.get(phase.productionOrderId) ?? [];
+    current.push(phase);
+    scheduleByOrderId.set(phase.productionOrderId, current);
+  });
+
+  return rows.map((row) => ({
+    ...row,
+    items: itemsByOrderId.get(row.id) ?? [],
+    schedulePhases: scheduleByOrderId.get(row.id) ?? [],
+  }));
+}
+
 router.get('/', async (req, res) => {
   await ensureProductionSchema();
   const contractorId = req.query.contractorId as string | undefined;
-  const rows = await db.select().from(productionOrders).orderBy(desc(productionOrders.createdAt));
-  const filtered = contractorId ? rows.filter((r) => r.assignedContractorId === contractorId) : rows;
-  const hydrated = await Promise.all(filtered.map((row) => hydrateProductionOrder(row)));
-  res.json(hydrated.filter(Boolean));
+  const rows = await db
+    .select()
+    .from(productionOrders)
+    .where(contractorId ? eq(productionOrders.assignedContractorId, contractorId) : undefined)
+    .orderBy(desc(productionOrders.createdAt));
+  const hydrated = await hydrateProductionOrders(rows);
+  res.json(hydrated);
 });
 
 router.get('/phase-machines', async (req, res) => {
