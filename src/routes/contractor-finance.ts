@@ -20,10 +20,18 @@ import { ensureContractorFinanceSchema } from '../db/ensure-contractor-finance';
 
 const router = Router();
 
-const boolishSchema = z.union([z.boolean(), z.string()]).optional().transform((value) => {
+const boolishWithDefault = (defaultValue: boolean) => z.union([z.boolean(), z.string()]).optional().transform((value) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') return value !== 'false';
-  return true;
+  return defaultValue;
+});
+
+const boolishSchema = boolishWithDefault(true);
+const boolishFalseSchema = boolishWithDefault(false);
+const optionalBoolishSchema = z.union([z.boolean(), z.string()]).optional().transform((value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value !== 'false';
+  return undefined;
 });
 
 const estimatedScheduleSchema = z.array(z.object({
@@ -56,8 +64,28 @@ const laborCatalogItemSchema = z.object({
   referencePrice: z.union([z.number(), z.string()]).optional(),
   enableHeight: boolishSchema,
   enableWidthQuantity: boolishSchema,
+  defaultHeight: z.union([z.number(), z.string()]).optional().default(0),
+  defaultWidthQuantity: z.union([z.number(), z.string()]).optional().default(0),
+  useDefaultHeight: boolishFalseSchema,
+  useDefaultWidthQuantity: boolishFalseSchema,
   active: z.enum(['true', 'false']).optional().default('true'),
   sortOrder: z.number().int().optional().default(0),
+});
+
+const updateLaborCatalogItemSchema = z.object({
+  itemKey: z.string().min(1).max(60).optional(),
+  label: z.string().min(1).max(160).optional(),
+  unit: z.string().min(1).max(30).optional(),
+  defaultAmount: z.union([z.number(), z.string()]).optional(),
+  referencePrice: z.union([z.number(), z.string()]).optional(),
+  enableHeight: optionalBoolishSchema,
+  enableWidthQuantity: optionalBoolishSchema,
+  defaultHeight: z.union([z.number(), z.string()]).optional(),
+  defaultWidthQuantity: z.union([z.number(), z.string()]).optional(),
+  useDefaultHeight: optionalBoolishSchema,
+  useDefaultWidthQuantity: optionalBoolishSchema,
+  active: z.enum(['true', 'false']).optional(),
+  sortOrder: z.number().int().optional(),
 });
 
 const planSchema = z.object({
@@ -155,6 +183,10 @@ function normalizeLaborItem(row: typeof contractorLaborCatalogItems.$inferSelect
     referencePrice: toNumber(row.defaultAmount),
     enableHeight: row.enableHeight,
     enableWidthQuantity: row.enableWidthQuantity,
+    defaultHeight: toNumber(row.defaultHeight),
+    defaultWidthQuantity: toNumber(row.defaultWidthQuantity),
+    useDefaultHeight: row.useDefaultHeight,
+    useDefaultWidthQuantity: row.useDefaultWidthQuantity,
     active: row.active !== 'false',
   };
 }
@@ -388,6 +420,10 @@ router.post('/labor-items', validate(laborCatalogItemSchema), async (req, res) =
       defaultAmount: money(referencePrice),
       enableHeight: req.body.enableHeight ?? true,
       enableWidthQuantity: req.body.enableWidthQuantity ?? true,
+      defaultHeight: measurement(req.body.defaultHeight ?? 0),
+      defaultWidthQuantity: measurement(req.body.defaultWidthQuantity ?? 0),
+      useDefaultHeight: req.body.useDefaultHeight ?? false,
+      useDefaultWidthQuantity: req.body.useDefaultWidthQuantity ?? false,
       active: req.body.active ?? 'true',
       sortOrder: req.body.sortOrder ?? 0,
     })
@@ -396,7 +432,7 @@ router.post('/labor-items', validate(laborCatalogItemSchema), async (req, res) =
   res.status(201).json(normalizeLaborItem(created));
 });
 
-router.put('/labor-items/:id', validate(laborCatalogItemSchema.partial()), async (req, res) => {
+router.put('/labor-items/:id', validate(updateLaborCatalogItemSchema), async (req, res) => {
   await ensureContractorFinanceSchema();
   const [updated] = await db
     .update(contractorLaborCatalogItems)
@@ -409,6 +445,10 @@ router.put('/labor-items/:id', validate(laborCatalogItemSchema.partial()), async
         : {}),
       ...(req.body.enableHeight !== undefined ? { enableHeight: req.body.enableHeight } : {}),
       ...(req.body.enableWidthQuantity !== undefined ? { enableWidthQuantity: req.body.enableWidthQuantity } : {}),
+      ...(req.body.defaultHeight !== undefined ? { defaultHeight: measurement(req.body.defaultHeight) } : {}),
+      ...(req.body.defaultWidthQuantity !== undefined ? { defaultWidthQuantity: measurement(req.body.defaultWidthQuantity) } : {}),
+      ...(req.body.useDefaultHeight !== undefined ? { useDefaultHeight: req.body.useDefaultHeight } : {}),
+      ...(req.body.useDefaultWidthQuantity !== undefined ? { useDefaultWidthQuantity: req.body.useDefaultWidthQuantity } : {}),
       ...(req.body.active !== undefined ? { active: req.body.active } : {}),
       ...(req.body.sortOrder !== undefined ? { sortOrder: req.body.sortOrder } : {}),
       updatedAt: new Date(),
@@ -553,8 +593,12 @@ router.post('/plans', validate(planSchema), async (req, res) => {
     const unitPrice = catalogItem ? toNumber(catalogItem.defaultAmount) : toNumber(line.unitPrice);
     const enableHeight = catalogItem ? catalogItem.enableHeight : line.enableHeight;
     const enableWidthQuantity = catalogItem ? catalogItem.enableWidthQuantity : line.enableWidthQuantity;
-    const width = enableHeight ? toNumber(line.width) : 0;
-    const heightQuantity = enableWidthQuantity ? toNumber(line.heightQuantity) : 0;
+    const width = enableHeight
+      ? (catalogItem?.useDefaultHeight ? toNumber(catalogItem.defaultHeight) : toNumber(line.width))
+      : 0;
+    const heightQuantity = enableWidthQuantity
+      ? (catalogItem?.useDefaultWidthQuantity ? toNumber(catalogItem.defaultWidthQuantity) : toNumber(line.heightQuantity))
+      : 0;
     const measuredTotal = calculateMeasuredTotal(width, heightQuantity, enableHeight, enableWidthQuantity, line.measuredTotal);
     const plannedAmount = measuredTotal > 0 && unitPrice > 0
       ? measuredTotal * unitPrice
