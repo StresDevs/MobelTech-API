@@ -255,6 +255,39 @@ async function notifyContractorPlanReview(planId: string, reviewStatus: 'approve
   });
 }
 
+async function notifyContractorAdvanceReview(requestId: string, status: 'approved' | 'rejected' | 'paid') {
+  const [request] = await db
+    .select({
+      contractorUserId: users.id,
+      productionOrderId: contractorAdvanceRequests.productionOrderId,
+      jobName: projects.name,
+      reviewNotes: contractorAdvanceRequests.reviewNotes,
+    })
+    .from(contractorAdvanceRequests)
+    .leftJoin(contractors, eq(contractorAdvanceRequests.contractorId, contractors.id))
+    .leftJoin(users, eq(contractors.userId, users.id))
+    .leftJoin(productionOrders, eq(contractorAdvanceRequests.productionOrderId, productionOrders.id))
+    .leftJoin(projects, eq(productionOrders.projectId, projects.id))
+    .where(eq(contractorAdvanceRequests.id, requestId));
+
+  if (!request?.contractorUserId) return;
+
+  const jobLabel = request.jobName ? ` para ${request.jobName}` : '';
+  const rejectionReason = request.reviewNotes ? `: ${request.reviewNotes}` : '.';
+  const message = status === 'approved'
+    ? `Tu solicitud de anticipo${jobLabel} fue aprobada.`
+    : status === 'paid'
+      ? `Tu solicitud de anticipo${jobLabel} fue marcada como pagada.`
+      : `Tu solicitud de anticipo${jobLabel} fue rechazada${rejectionReason}`;
+
+  await db.insert(notifications).values({
+    id: randomUUID(),
+    recipientUserId: request.contractorUserId,
+    message,
+    relatedJobId: request.productionOrderId,
+  });
+}
+
 async function hydratePlans(filters?: {
   contractorId?: string;
   search?: string;
@@ -752,34 +785,71 @@ router.post('/advance-requests', validate(advanceRequestSchema), async (req, res
     return;
   }
 
+  const existingRequests = await db
+    .select()
+    .from(contractorAdvanceRequests)
+    .where(eq(contractorAdvanceRequests.planId, req.body.planId))
+    .orderBy(desc(contractorAdvanceRequests.requestedAt), desc(contractorAdvanceRequests.createdAt));
+  const activeRequest = existingRequests.find((request) => request.status !== 'rejected');
+
+  if (activeRequest) {
+    res.status(409).json({ error: 'Este trabajo ya tiene una solicitud de anticipo activa.' });
+    return;
+  }
+
   const [contractor] = await db
     .select({ name: contractors.name })
     .from(contractors)
     .where(eq(contractors.id, req.body.contractorId));
 
-  const [created] = await db
-    .insert(contractorAdvanceRequests)
-    .values({
-      planId: req.body.planId,
-      contractorId: req.body.contractorId,
-      productionOrderId: req.body.productionOrderId,
-      amount: money(amount),
-      notes: req.body.notes ?? null,
-      status: 'submitted',
-      reviewNotes: null,
-    })
-    .returning();
+  const rejectedRequest = existingRequests.find((request) => request.status === 'rejected');
+  const [saved] = rejectedRequest
+    ? await db
+        .update(contractorAdvanceRequests)
+        .set({
+          amount: money(amount),
+          notes: req.body.notes ?? null,
+          status: 'submitted',
+          reviewNotes: null,
+          requestedAt: new Date(),
+          reviewedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(contractorAdvanceRequests.id, rejectedRequest.id))
+        .returning()
+    : await db
+        .insert(contractorAdvanceRequests)
+        .values({
+          planId: req.body.planId,
+          contractorId: req.body.contractorId,
+          productionOrderId: req.body.productionOrderId,
+          amount: money(amount),
+          notes: req.body.notes ?? null,
+          status: 'submitted',
+          reviewNotes: null,
+        })
+        .returning();
 
   await notifyOperations(
     `Nueva solicitud de anticipo de mano de obra de ${contractor?.name ?? 'un contratista'}.`,
     req.body.productionOrderId,
   );
 
-  res.status(201).json(normalizeAdvanceRequest(created));
+  res.status(rejectedRequest ? 200 : 201).json(normalizeAdvanceRequest(saved));
 });
 
 router.patch('/advance-requests/:id/review', validate(reviewAdvanceSchema), async (req, res) => {
   await ensureContractorFinanceSchema();
+  const [existing] = await db
+    .select({ id: contractorAdvanceRequests.id, status: contractorAdvanceRequests.status })
+    .from(contractorAdvanceRequests)
+    .where(eq(contractorAdvanceRequests.id, req.params.id as string));
+
+  if (!existing) {
+    res.status(404).json({ error: 'Solicitud de anticipo no encontrada' });
+    return;
+  }
+
   const [updated] = await db
     .update(contractorAdvanceRequests)
     .set({
@@ -794,6 +864,10 @@ router.patch('/advance-requests/:id/review', validate(reviewAdvanceSchema), asyn
   if (!updated) {
     res.status(404).json({ error: 'Solicitud de anticipo no encontrada' });
     return;
+  }
+
+  if (existing.status !== req.body.status && req.body.status !== 'submitted') {
+    await notifyContractorAdvanceReview(updated.id, req.body.status);
   }
 
   res.json(normalizeAdvanceRequest(updated));
