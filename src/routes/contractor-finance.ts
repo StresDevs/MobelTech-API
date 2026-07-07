@@ -192,6 +192,37 @@ async function notifyOperations(message: string, relatedJobId?: string | null) {
   );
 }
 
+async function notifyContractorPlanReview(planId: string, reviewStatus: 'approved' | 'rejected') {
+  const [plan] = await db
+    .select({
+      contractorUserId: users.id,
+      productionOrderId: contractorPaymentPlans.productionOrderId,
+      jobName: projects.name,
+      reviewNotes: contractorPaymentPlans.reviewNotes,
+    })
+    .from(contractorPaymentPlans)
+    .leftJoin(contractors, eq(contractorPaymentPlans.contractorId, contractors.id))
+    .leftJoin(users, eq(contractors.userId, users.id))
+    .leftJoin(productionOrders, eq(contractorPaymentPlans.productionOrderId, productionOrders.id))
+    .leftJoin(projects, eq(productionOrders.projectId, projects.id))
+    .where(eq(contractorPaymentPlans.id, planId));
+
+  if (!plan?.contractorUserId) return;
+
+  const jobLabel = plan.jobName ? ` para ${plan.jobName}` : '';
+  const rejectionReason = plan.reviewNotes ? `: ${plan.reviewNotes}` : '.';
+  const message = reviewStatus === 'approved'
+    ? `Tu solicitud de pago de mano de obra${jobLabel} fue aprobada.`
+    : `Tu solicitud de pago de mano de obra${jobLabel} fue rechazada${rejectionReason}`;
+
+  await db.insert(notifications).values({
+    id: randomUUID(),
+    recipientUserId: plan.contractorUserId,
+    message,
+    relatedJobId: plan.productionOrderId,
+  });
+}
+
 async function hydratePlans(filters?: {
   contractorId?: string;
   search?: string;
@@ -571,6 +602,19 @@ router.post('/plans', validate(planSchema), async (req, res) => {
 
 router.patch('/plans/:id/review', validate(reviewPlanSchema), async (req, res) => {
   await ensureContractorFinanceSchema();
+  const [existingPlan] = await db
+    .select({
+      id: contractorPaymentPlans.id,
+      reviewStatus: contractorPaymentPlans.reviewStatus,
+    })
+    .from(contractorPaymentPlans)
+    .where(eq(contractorPaymentPlans.id, req.params.id as string));
+
+  if (!existingPlan) {
+    res.status(404).json({ error: 'Plan de mano de obra no encontrado' });
+    return;
+  }
+
   const [plan] = await db
     .update(contractorPaymentPlans)
     .set({
@@ -584,6 +628,14 @@ router.patch('/plans/:id/review', validate(reviewPlanSchema), async (req, res) =
   if (!plan) {
     res.status(404).json({ error: 'Plan de mano de obra no encontrado' });
     return;
+  }
+
+  const shouldNotifyContractor =
+    existingPlan.reviewStatus !== req.body.reviewStatus &&
+    (req.body.reviewStatus === 'approved' || req.body.reviewStatus === 'rejected');
+
+  if (shouldNotifyContractor) {
+    await notifyContractorPlanReview(plan.id, req.body.reviewStatus);
   }
 
   const updatedPlans = await hydratePlans();

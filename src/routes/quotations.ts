@@ -15,6 +15,7 @@ import {
   quotationAuditLogs,
   quotationItems,
   quotations,
+  users,
 } from '../db/schema';
 import { validate } from '../middleware/validate';
 import { randomUUID } from 'crypto';
@@ -484,9 +485,10 @@ router.post('/:id/environment-projects', validate(createQuotationEnvironmentProj
         .select({
           id: contractors.id,
           name: contractors.name,
-          userId: contractors.userId,
+          userId: users.id,
         })
         .from(contractors)
+        .leftJoin(users, eq(contractors.userId, users.id))
         .where(inArray(contractors.id, contractorIds))
     : [];
 
@@ -513,80 +515,98 @@ router.post('/:id/environment-projects', validate(createQuotationEnvironmentProj
     return;
   }
 
-  for (const entry of payloadProjects) {
-    const clientPrice = entry.clientPrice ?? entry.price;
-    const [project] = await db.insert(projects).values({
-      name: entry.ambience.trim(),
+  const preparedProjects = payloadProjects.map((entry) => ({
+    entry,
+    clientPrice: entry.clientPrice ?? entry.price,
+    projectId: randomUUID(),
+    environmentId: randomUUID(),
+    productionOrderId: entry.assignedContractorId ? randomUUID() : null,
+  }));
+
+  await db.insert(projects).values(preparedProjects.map(({ entry, clientPrice, projectId }) => ({
+    id: projectId,
+    name: entry.ambience.trim(),
+    clientId: quotation.clientId,
+    status: 'production' as const,
+    startDate: entry.estimatedStartDate,
+    estimatedDeliveryDate: entry.estimatedEndDate,
+    budget: String(clientPrice),
+    totalRevenue: String(clientPrice),
+  })));
+
+  await db.insert(projectEnvironments).values(preparedProjects.map(({ entry, clientPrice, projectId, environmentId }) => ({
+    id: environmentId,
+    quotationId,
+    projectId,
+    assignedContractorId: entry.assignedContractorId ?? null,
+    ambience: entry.ambience.trim(),
+    description: entry.description?.trim() || null,
+    sketchupFileName: entry.sketchupFileName?.trim() || null,
+    sketchupFileUrl: entry.sketchupFileUrl?.trim() || null,
+    sketchupFileSize: entry.sketchupFileSize?.trim() || null,
+    price: String(clientPrice),
+    clientPrice: String(clientPrice),
+    estimatedStartDate: entry.estimatedStartDate,
+    estimatedEndDate: entry.estimatedEndDate,
+  })));
+
+  const furnitureFileRows = preparedProjects
+    .filter(({ entry }) => Boolean(entry.sketchupFileName && entry.sketchupFileData))
+    .map(({ entry, environmentId }) => ({
+      id: randomUUID(),
+      quotationId,
+      projectEnvironmentId: environmentId,
       clientId: quotation.clientId,
-      status: 'production',
+      assignedContractorId: entry.assignedContractorId ?? null,
+      version: 1,
+      fileName: entry.sketchupFileName?.trim() ?? '',
+      fileSize: entry.sketchupFileSize?.trim() || null,
+      mimeType: 'application/octet-stream',
+      fileData: entry.sketchupFileData ?? '',
+      uploadedBy: entry.uploadedBy?.trim() || 'Usuario',
+      notes: entry.ambience.trim(),
+    }));
+
+  if (furnitureFileRows.length > 0) {
+    await db.insert(furnitureFiles).values(furnitureFileRows);
+    await db.insert(furnitureFileLogs).values(furnitureFileRows.map((file) => ({
+      furnitureFileId: file.id,
+      action: 'file_uploaded' as const,
+      performedBy: file.uploadedBy,
+      description: `Archivo SketchUp inicial subido: ${file.fileName} (v1)`,
+    })));
+  }
+
+  const productionOrderRows = preparedProjects
+    .filter(({ entry, productionOrderId }) => Boolean(entry.assignedContractorId && productionOrderId))
+    .map(({ entry, projectId, productionOrderId }) => ({
+      id: productionOrderId as string,
+      projectId,
+      quotationId,
+      assignedContractorId: entry.assignedContractorId as string,
+      status: 'pending' as const,
       startDate: entry.estimatedStartDate,
       estimatedDeliveryDate: entry.estimatedEndDate,
-      budget: String(clientPrice),
-      totalRevenue: String(clientPrice),
-    }).returning();
+    }));
 
-    const [environmentProject] = await db.insert(projectEnvironments).values({
-      quotationId,
-      projectId: project.id,
-      assignedContractorId: entry.assignedContractorId ?? null,
-      ambience: entry.ambience.trim(),
-      description: entry.description?.trim() || null,
-      sketchupFileName: entry.sketchupFileName?.trim() || null,
-      sketchupFileUrl: entry.sketchupFileUrl?.trim() || null,
-      sketchupFileSize: entry.sketchupFileSize?.trim() || null,
-      price: String(clientPrice),
-      clientPrice: String(clientPrice),
-      estimatedStartDate: entry.estimatedStartDate,
-      estimatedEndDate: entry.estimatedEndDate,
-    }).returning();
+  if (productionOrderRows.length > 0) {
+    await db.insert(productionOrders).values(productionOrderRows);
+  }
 
-    if (entry.sketchupFileName && entry.sketchupFileData) {
-      const [furnitureFile] = await db.insert(furnitureFiles).values({
-        quotationId,
-        projectEnvironmentId: environmentProject.id,
-        clientId: quotation.clientId,
-        assignedContractorId: entry.assignedContractorId ?? null,
-        version: 1,
-        fileName: entry.sketchupFileName.trim(),
-        fileSize: entry.sketchupFileSize?.trim() || null,
-        mimeType: 'application/octet-stream',
-        fileData: entry.sketchupFileData,
-        uploadedBy: entry.uploadedBy?.trim() || 'Usuario',
-        notes: entry.ambience.trim(),
-      }).returning();
+  const notificationRows = preparedProjects.flatMap(({ entry, productionOrderId }) => {
+    if (!entry.assignedContractorId || !productionOrderId) return [];
+    const contractor = contractorsById.get(entry.assignedContractorId);
+    if (!contractor?.userId) return [];
+    return [{
+      id: randomUUID(),
+      recipientUserId: contractor.userId,
+      message: `Tienes un ambiente asignado: ${entry.ambience}`,
+      relatedJobId: productionOrderId,
+    }];
+  });
 
-      await db.insert(furnitureFileLogs).values({
-        furnitureFileId: furnitureFile.id,
-        action: 'file_uploaded',
-        performedBy: entry.uploadedBy?.trim() || 'Usuario',
-        description: `Archivo SketchUp inicial subido: ${entry.sketchupFileName.trim()} (v1)`,
-      });
-    }
-
-    if (entry.assignedContractorId) {
-      const contractor = contractorsById.get(entry.assignedContractorId);
-      const [productionOrder] = await db.insert(productionOrders).values({
-        projectId: project.id,
-        quotationId,
-        assignedContractorId: entry.assignedContractorId,
-        status: 'pending',
-        startDate: entry.estimatedStartDate,
-        estimatedDeliveryDate: entry.estimatedEndDate,
-      }).returning();
-
-      if (contractor?.userId) {
-        await db.insert(notifications).values({
-          id: randomUUID(),
-          recipientUserId: contractor.userId,
-          message: `Tienes un ambiente asignado: ${entry.ambience}`,
-          relatedJobId: productionOrder.id,
-        });
-      }
-
-      await db.update(projectEnvironments)
-        .set({ updatedAt: new Date() })
-        .where(eq(projectEnvironments.id, environmentProject.id));
-    }
+  if (notificationRows.length > 0) {
+    await db.insert(notifications).values(notificationRows);
   }
 
   res.status(201).json(await getHydratedQuotationById(quotationId));
