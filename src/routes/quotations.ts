@@ -649,16 +649,23 @@ router.put(
       return;
     }
 
+    let nextContractor: { id: string; name: string; userId: string | null } | null = null;
     if (payload.assignedContractorId) {
       const [contractor] = await db
-        .select({ id: contractors.id })
+        .select({
+          id: contractors.id,
+          name: contractors.name,
+          userId: users.id,
+        })
         .from(contractors)
+        .leftJoin(users, eq(contractors.userId, users.id))
         .where(eq(contractors.id, payload.assignedContractorId));
 
       if (!contractor) {
         res.status(400).json({ error: 'Assigned contractor was not found' });
         return;
       }
+      nextContractor = contractor;
     }
 
     const nextStartDate = payload.estimatedStartDate ?? environment.estimatedStartDate;
@@ -695,6 +702,18 @@ router.put(
       })
       .where(eq(projectEnvironments.id, environmentId));
 
+    if (payload.assignedContractorId !== undefined) {
+      await db
+        .update(furnitureFiles)
+        .set({
+          assignedContractorId: payload.assignedContractorId ?? null,
+          updatedAt: new Date(),
+        })
+        .where(eq(furnitureFiles.projectEnvironmentId, environmentId));
+    }
+
+    let relatedProductionOrderId: string | null = null;
+
     if (environment.projectId) {
       await db
         .update(projects)
@@ -709,15 +728,51 @@ router.put(
         })
         .where(eq(projects.id, environment.projectId));
 
-      await db
-        .update(productionOrders)
-        .set({
-          ...(payload.assignedContractorId !== undefined ? { assignedContractorId: payload.assignedContractorId ?? null } : {}),
-          ...(payload.estimatedStartDate !== undefined ? { startDate: payload.estimatedStartDate } : {}),
-          ...(payload.estimatedEndDate !== undefined ? { estimatedDeliveryDate: payload.estimatedEndDate } : {}),
-          updatedAt: new Date(),
-        })
+      const [existingProductionOrder] = await db
+        .select()
+        .from(productionOrders)
         .where(and(eq(productionOrders.projectId, environment.projectId), eq(productionOrders.quotationId, quotationId)));
+
+      if (existingProductionOrder) {
+        const [updatedProductionOrder] = await db
+          .update(productionOrders)
+          .set({
+            ...(payload.assignedContractorId !== undefined ? { assignedContractorId: payload.assignedContractorId ?? null } : {}),
+            ...(payload.estimatedStartDate !== undefined ? { startDate: payload.estimatedStartDate } : {}),
+            ...(payload.estimatedEndDate !== undefined ? { estimatedDeliveryDate: payload.estimatedEndDate } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(productionOrders.id, existingProductionOrder.id))
+          .returning();
+        relatedProductionOrderId = updatedProductionOrder?.id ?? existingProductionOrder.id;
+      } else if (payload.assignedContractorId) {
+        const [createdProductionOrder] = await db
+          .insert(productionOrders)
+          .values({
+            id: randomUUID(),
+            projectId: environment.projectId,
+            quotationId,
+            assignedContractorId: payload.assignedContractorId,
+            status: 'pending',
+            startDate: nextStartDate,
+            estimatedDeliveryDate: nextEndDate,
+          })
+          .returning();
+        relatedProductionOrderId = createdProductionOrder.id;
+      }
+    }
+
+    const assignedContractorChanged =
+      payload.assignedContractorId !== undefined &&
+      payload.assignedContractorId !== environment.assignedContractorId;
+
+    if (assignedContractorChanged && payload.assignedContractorId && nextContractor?.userId && relatedProductionOrderId) {
+      await db.insert(notifications).values({
+        id: randomUUID(),
+        recipientUserId: nextContractor.userId,
+        message: `Tienes un ambiente asignado: ${payload.ambience?.trim() || environment.ambience}`,
+        relatedJobId: relatedProductionOrderId,
+      });
     }
 
     res.json(await getHydratedQuotationById(quotationId));
