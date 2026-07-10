@@ -352,8 +352,8 @@ router.patch('/:id/items', validate(updateMaterialRequestItemsSchema), async (re
     return;
   }
 
-  if (existing.status !== 'approved') {
-    res.status(409).json({ error: 'Solo puedes reajustar solicitudes aprobadas.' });
+  if (!['pending', 'approved'].includes(existing.status)) {
+    res.status(409).json({ error: 'Solo puedes reajustar solicitudes pendientes o aprobadas.' });
     return;
   }
 
