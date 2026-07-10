@@ -5,10 +5,12 @@ import { z } from 'zod';
 import { db } from '../db';
 import {
   contractors,
+  materialRequestItemAdjustments,
   materialRequestItems,
   materialRequests,
   notifications,
   productionOrders,
+  projects,
   users,
 } from '../db/schema';
 import { validate } from '../middleware/validate';
@@ -35,10 +37,20 @@ const updateMaterialRequestStatusSchema = z.object({
   reviewedByUserId: z.string().optional().nullable(),
 });
 
+const updateMaterialRequestItemsSchema = z.object({
+  contractorId: z.string().uuid(),
+  changedByUserId: z.string().optional().nullable(),
+  items: z.array(z.object({
+    id: z.string().uuid(),
+    quantity: z.number().int().positive(),
+  })).min(1),
+});
+
 async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inferSelect[]) {
   if (requestRows.length === 0) return [];
 
   let itemRows: typeof materialRequestItems.$inferSelect[] = [];
+  let adjustmentRows: typeof materialRequestItemAdjustments.$inferSelect[] = [];
 
   try {
     itemRows = await db
@@ -46,9 +58,19 @@ async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inf
       .from(materialRequestItems)
       .where(inArray(materialRequestItems.materialRequestId, requestRows.map((row) => row.id)))
       .orderBy(asc(materialRequestItems.createdAt));
+
+    adjustmentRows = await db
+      .select()
+      .from(materialRequestItemAdjustments)
+      .where(inArray(materialRequestItemAdjustments.materialRequestId, requestRows.map((row) => row.id)))
+      .orderBy(desc(materialRequestItemAdjustments.createdAt));
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
-    if (!message.includes('material_request_items') || !message.includes('does not exist')) {
+    const missingMaterialRequestTable = (
+      message.includes('material_request_items') ||
+      message.includes('material_request_item_adjustments')
+    ) && message.includes('does not exist');
+    if (!missingMaterialRequestTable) {
       throw error;
     }
   }
@@ -56,6 +78,7 @@ async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inf
   return requestRows.map((request) => ({
     ...request,
     items: itemRows.filter((item) => item.materialRequestId === request.id),
+    adjustments: adjustmentRows.filter((adjustment) => adjustment.materialRequestId === request.id),
   }));
 }
 
@@ -150,6 +173,140 @@ router.post('/', validate(createMaterialRequestSchema), async (req, res) => {
 
   const [hydrated] = await hydrateMaterialRequests([created]);
   res.status(201).json(hydrated);
+});
+
+router.patch('/:id/items', validate(updateMaterialRequestItemsSchema), async (req, res) => {
+  const requestId = req.params.id as string;
+  const { contractorId, changedByUserId, items } = req.body;
+
+  const [existing] = await db
+    .select()
+    .from(materialRequests)
+    .where(eq(materialRequests.id, requestId));
+
+  if (!existing) {
+    res.status(404).json({ error: 'Material request not found' });
+    return;
+  }
+
+  if (existing.contractorId !== contractorId) {
+    res.status(403).json({ error: 'No puedes modificar una solicitud de otro contratista.' });
+    return;
+  }
+
+  if (existing.status !== 'approved') {
+    res.status(409).json({ error: 'Solo puedes reajustar solicitudes aprobadas.' });
+    return;
+  }
+
+  if (!existing.productionOrderId) {
+    res.status(409).json({ error: 'La solicitud no está vinculada a un trabajo vigente.' });
+    return;
+  }
+
+  const [order] = await db
+    .select()
+    .from(productionOrders)
+    .where(eq(productionOrders.id, existing.productionOrderId));
+
+  if (!order) {
+    res.status(404).json({ error: 'Production order not found' });
+    return;
+  }
+
+  if (order.status === 'completed') {
+    res.status(409).json({ error: 'No puedes reajustar solicitudes de trabajos entregados.' });
+    return;
+  }
+
+  if (order.projectId) {
+    const [project] = await db
+      .select({ status: projects.status })
+      .from(projects)
+      .where(eq(projects.id, order.projectId));
+
+    if (project?.status === 'delivered') {
+      res.status(409).json({ error: 'No puedes reajustar solicitudes de proyectos entregados.' });
+      return;
+    }
+  }
+
+  const currentItems = await db
+    .select()
+    .from(materialRequestItems)
+    .where(eq(materialRequestItems.materialRequestId, requestId));
+
+  const currentById = new Map(currentItems.map((item) => [item.id, item]));
+  const changes: Array<{
+    item: typeof currentItems[number];
+    nextQuantity: number;
+  }> = [];
+
+  for (const submittedItem of items as Array<z.infer<typeof updateMaterialRequestItemsSchema>['items'][number]>) {
+    const current = currentById.get(submittedItem.id);
+    if (!current) {
+      res.status(400).json({ error: 'La solicitud contiene un material que no pertenece a este registro.' });
+      return;
+    }
+
+    if (current.quantity !== submittedItem.quantity) {
+      changes.push({ item: current, nextQuantity: submittedItem.quantity });
+    }
+  }
+
+  if (changes.length === 0) {
+    const [hydrated] = await hydrateMaterialRequests([existing]);
+    res.json(hydrated);
+    return;
+  }
+
+  const normalizedChangedBy = changedByUserId && UUID_REGEX.test(changedByUserId) ? changedByUserId : null;
+
+  for (const change of changes) {
+    await db
+      .update(materialRequestItems)
+      .set({ quantity: change.nextQuantity })
+      .where(eq(materialRequestItems.id, change.item.id));
+  }
+
+  await db.insert(materialRequestItemAdjustments).values(
+    changes.map((change) => ({
+      id: randomUUID(),
+      materialRequestId: requestId,
+      materialRequestItemId: change.item.id,
+      materialId: change.item.materialId,
+      previousQuantity: change.item.quantity,
+      newQuantity: change.nextQuantity,
+      note: `Cantidad reajustada de ${change.item.quantity} a ${change.nextQuantity}.`,
+      changedByUserId: normalizedChangedBy,
+    })),
+  );
+
+  const [updated] = await db
+    .update(materialRequests)
+    .set({ updatedAt: new Date() })
+    .where(eq(materialRequests.id, requestId))
+    .returning();
+
+  const [contractor] = await db
+    .select()
+    .from(contractors)
+    .where(eq(contractors.id, contractorId));
+
+  const adminUsers = await getOperationsRecipients();
+  if (adminUsers.length > 0) {
+    await db.insert(notifications).values(
+      adminUsers.map((user) => ({
+        id: randomUUID(),
+        recipientUserId: user.id,
+        message: `${contractor?.name ?? 'Un contratista'} reajustó cantidades de una solicitud de materiales aprobada.`,
+        relatedJobId: existing.productionOrderId,
+      })),
+    );
+  }
+
+  const [hydrated] = await hydrateMaterialRequests([updated]);
+  res.json(hydrated);
 });
 
 router.patch('/:id/status', validate(updateMaterialRequestStatusSchema), async (req, res) => {

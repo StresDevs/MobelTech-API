@@ -42,6 +42,7 @@ export {
 export {
   materialRequests,
   materialRequestItems,
+  materialRequestItemAdjustments,
   materialRequestStatusEnum,
 } from './material-requests';
 export {

@@ -48,3 +48,22 @@ export const materialRequestItems = pgTable('material_request_items', {
   notes: text('notes'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const materialRequestItemAdjustments = pgTable('material_request_item_adjustments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  materialRequestId: uuid('material_request_id')
+    .notNull()
+    .references(() => materialRequests.id, { onDelete: 'cascade' }),
+  materialRequestItemId: uuid('material_request_item_id')
+    .notNull()
+    .references(() => materialRequestItems.id, { onDelete: 'cascade' }),
+  materialId: uuid('material_id')
+    .notNull()
+    .references(() => materials.id, { onDelete: 'restrict' }),
+  previousQuantity: integer('previous_quantity').notNull(),
+  newQuantity: integer('new_quantity').notNull(),
+  note: text('note'),
+  changedByUserId: uuid('changed_by_user_id')
+    .references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
