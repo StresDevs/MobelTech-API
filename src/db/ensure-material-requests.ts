@@ -63,6 +63,11 @@ export function ensureMaterialRequestsSchema() {
       `;
 
       await sql`
+        ALTER TABLE material_requests
+        ADD COLUMN IF NOT EXISTS stock_consumed_at timestamptz
+      `;
+
+      await sql`
         CREATE INDEX IF NOT EXISTS material_requests_contractor_idx
         ON material_requests(contractor_id, request_date DESC)
       `;

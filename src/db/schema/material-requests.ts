@@ -31,6 +31,7 @@ export const materialRequests = pgTable('material_requests', {
   status: materialRequestStatusEnum('status').notNull().default('pending'),
   rejectionComments: text('rejection_comments'),
   adminNotes: text('admin_notes'),
+  stockConsumedAt: timestamp('stock_consumed_at', { withTimezone: true }),
   requestDate: timestamp('request_date', { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

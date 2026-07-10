@@ -8,6 +8,8 @@ import {
   materialRequestItemAdjustments,
   materialRequestItems,
   materialRequests,
+  materialUsageLogs,
+  materials,
   notifications,
   productionOrders,
   projects,
@@ -89,6 +91,131 @@ async function getOperationsRecipients() {
     .where(or(eq(users.role, 'admin'), eq(users.role, 'architect')));
 }
 
+type StockMovement = {
+  materialId: string;
+  quantityDelta: number;
+  usageNote?: string;
+};
+
+function aggregateStockMovements(movements: StockMovement[]) {
+  const aggregated = new Map<string, StockMovement>();
+
+  movements.forEach((movement) => {
+    if (!movement.materialId || movement.quantityDelta === 0) return;
+    const current = aggregated.get(movement.materialId);
+    aggregated.set(movement.materialId, {
+      materialId: movement.materialId,
+      quantityDelta: (current?.quantityDelta ?? 0) + movement.quantityDelta,
+      usageNote: movement.usageNote ?? current?.usageNote,
+    });
+  });
+
+  return Array.from(aggregated.values()).filter((movement) => movement.quantityDelta !== 0);
+}
+
+async function getUsageProjectName(productionOrderId?: string | null) {
+  if (!productionOrderId) return 'Solicitud de material';
+
+  const [order] = await db
+    .select()
+    .from(productionOrders)
+    .where(eq(productionOrders.id, productionOrderId));
+
+  if (!order) return `Trabajo ${productionOrderId.slice(0, 8)}`;
+
+  if (order.projectId) {
+    const [project] = await db
+      .select({ name: projects.name })
+      .from(projects)
+      .where(eq(projects.id, order.projectId));
+
+    if (project?.name) return project.name;
+  }
+
+  return `Trabajo ${order.id.slice(0, 8)}`;
+}
+
+async function applyMaterialStockMovements(
+  movements: StockMovement[],
+  options: { projectName: string; logUsage?: boolean },
+) {
+  const aggregated = aggregateStockMovements(movements);
+  if (aggregated.length === 0) return null;
+
+  const materialIds = aggregated.map((movement) => movement.materialId);
+  const materialRows = await db
+    .select()
+    .from(materials)
+    .where(inArray(materials.id, materialIds));
+  const materialsById = new Map(materialRows.map((material) => [material.id, material]));
+
+  for (const movement of aggregated) {
+    const material = materialsById.get(movement.materialId);
+    if (!material) return 'Uno de los materiales solicitados no existe en inventario.';
+
+    const currentStock = Number(material.stockPhysical ?? material.stock ?? 0);
+    const nextStock = currentStock + movement.quantityDelta;
+    if (nextStock < 0) {
+      return `Stock insuficiente para ${material.name}. Disponible: ${currentStock}, solicitado: ${Math.abs(movement.quantityDelta)}.`;
+    }
+  }
+
+  for (const movement of aggregated) {
+    const material = materialsById.get(movement.materialId);
+    if (!material) continue;
+
+    const currentStock = Number(material.stockPhysical ?? material.stock ?? 0);
+    const nextStock = currentStock + movement.quantityDelta;
+    await db
+      .update(materials)
+      .set({
+        stock: nextStock,
+        stockPhysical: nextStock,
+        updatedAt: new Date(),
+      })
+      .where(eq(materials.id, movement.materialId));
+
+    if (options.logUsage && movement.quantityDelta < 0) {
+      await db.insert(materialUsageLogs).values({
+        id: randomUUID(),
+        materialId: movement.materialId,
+        projectName: options.projectName,
+        usedOn: new Date().toISOString().slice(0, 10),
+        quantity: String(Math.abs(movement.quantityDelta)),
+        notes: movement.usageNote ?? 'Consumo por solicitud de material de contratista.',
+      });
+    }
+  }
+
+  return null;
+}
+
+async function validateMaterialStockMovements(movements: StockMovement[]) {
+  const aggregated = aggregateStockMovements(movements);
+  if (aggregated.length === 0) return null;
+
+  const materialRows = await db
+    .select()
+    .from(materials)
+    .where(inArray(materials.id, aggregated.map((movement) => movement.materialId)));
+  const materialsById = new Map(materialRows.map((material) => [material.id, material]));
+
+  for (const movement of aggregated) {
+    if (movement.quantityDelta >= 0) continue;
+
+    const material = materialsById.get(movement.materialId);
+    if (!material) return 'Uno de los materiales solicitados no existe en inventario.';
+
+    const currentStock = Number(material.stockPhysical ?? material.stock ?? 0);
+    const requestedQuantity = Math.abs(movement.quantityDelta);
+    if (currentStock < requestedQuantity) {
+      return `Stock insuficiente para ${material.name}. Disponible: ${currentStock}, solicitado: ${requestedQuantity}.`;
+    }
+  }
+
+  return null;
+}
+
 router.get('/', async (req, res) => {
   const contractorId = String(req.query.contractorId ?? '').trim();
   const status = String(req.query.status ?? '').trim();
@@ -114,6 +241,11 @@ router.get('/', async (req, res) => {
 
 router.post('/', validate(createMaterialRequestSchema), async (req, res) => {
   const { contractorId, items, productionOrderId, submittedByUserId } = req.body;
+  const requestedStockMovements = (items as Array<z.infer<typeof requestItemSchema>>).map((item) => ({
+    materialId: item.materialId,
+    quantityDelta: -item.quantity,
+    usageNote: 'Consumo inicial por solicitud de material de contratista.',
+  }));
 
   const [contractor] = await db
     .select()
@@ -137,6 +269,12 @@ router.post('/', validate(createMaterialRequestSchema), async (req, res) => {
     }
   }
 
+  const stockError = await validateMaterialStockMovements(requestedStockMovements);
+  if (stockError) {
+    res.status(409).json({ error: stockError });
+    return;
+  }
+
   const [created] = await db
     .insert(materialRequests)
     .values({
@@ -158,6 +296,26 @@ router.post('/', validate(createMaterialRequestSchema), async (req, res) => {
     })),
   );
 
+  const usageProjectName = await getUsageProjectName(productionOrderId ?? null);
+  const appliedStockError = await applyMaterialStockMovements(requestedStockMovements, {
+    projectName: usageProjectName,
+    logUsage: true,
+  });
+  if (appliedStockError) {
+    await db.delete(materialRequests).where(eq(materialRequests.id, created.id));
+    res.status(409).json({ error: appliedStockError });
+    return;
+  }
+
+  const [stockMarkedRequest] = await db
+    .update(materialRequests)
+    .set({
+      stockConsumedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(materialRequests.id, created.id))
+    .returning();
+
   const adminUsers = await getOperationsRecipients();
 
   if (adminUsers.length > 0) {
@@ -171,7 +329,7 @@ router.post('/', validate(createMaterialRequestSchema), async (req, res) => {
     );
   }
 
-  const [hydrated] = await hydrateMaterialRequests([created]);
+  const [hydrated] = await hydrateMaterialRequests([stockMarkedRequest]);
   res.status(201).json(hydrated);
 });
 
@@ -260,6 +418,37 @@ router.patch('/:id/items', validate(updateMaterialRequestItemsSchema), async (re
     return;
   }
 
+  const nextQuantityByItemId = new Map(
+    (items as Array<z.infer<typeof updateMaterialRequestItemsSchema>['items'][number]>)
+      .map((item) => [item.id, item.quantity]),
+  );
+  const stockMovements = existing.stockConsumedAt
+    ? changes.map((change) => ({
+        materialId: change.item.materialId,
+        quantityDelta: change.item.quantity - change.nextQuantity,
+        usageNote: `Reajuste de solicitud de material: ${change.item.quantity} a ${change.nextQuantity}.`,
+      }))
+    : currentItems.map((item) => ({
+        materialId: item.materialId,
+        quantityDelta: -(nextQuantityByItemId.get(item.id) ?? item.quantity),
+        usageNote: 'Consumo de solicitud aprobada existente al reajustar cantidades.',
+      }));
+  const stockError = await validateMaterialStockMovements(stockMovements);
+  if (stockError) {
+    res.status(409).json({ error: stockError });
+    return;
+  }
+
+  const usageProjectName = await getUsageProjectName(existing.productionOrderId);
+  const appliedStockError = await applyMaterialStockMovements(stockMovements, {
+    projectName: usageProjectName,
+    logUsage: true,
+  });
+  if (appliedStockError) {
+    res.status(409).json({ error: appliedStockError });
+    return;
+  }
+
   const normalizedChangedBy = changedByUserId && UUID_REGEX.test(changedByUserId) ? changedByUserId : null;
 
   for (const change of changes) {
@@ -284,7 +473,10 @@ router.patch('/:id/items', validate(updateMaterialRequestItemsSchema), async (re
 
   const [updated] = await db
     .update(materialRequests)
-    .set({ updatedAt: new Date() })
+    .set({
+      stockConsumedAt: existing.stockConsumedAt ?? new Date(),
+      updatedAt: new Date(),
+    })
     .where(eq(materialRequests.id, requestId))
     .returning();
 
@@ -328,6 +520,47 @@ router.patch('/:id/status', validate(updateMaterialRequestStatusSchema), async (
     return;
   }
 
+  const currentItems = await db
+    .select()
+    .from(materialRequestItems)
+    .where(eq(materialRequestItems.materialRequestId, requestId));
+  const stockMovements =
+    status === 'approved' && !existing.stockConsumedAt
+      ? currentItems.map((item) => ({
+          materialId: item.materialId,
+          quantityDelta: -item.quantity,
+          usageNote: 'Consumo por aprobación de solicitud de material.',
+        }))
+      : status === 'rejected' && existing.stockConsumedAt
+      ? currentItems.map((item) => ({
+          materialId: item.materialId,
+          quantityDelta: item.quantity,
+          usageNote: 'Devolución por rechazo de solicitud de material.',
+        }))
+      : [];
+  const stockError = await validateMaterialStockMovements(stockMovements);
+  if (stockError) {
+    res.status(409).json({ error: stockError });
+    return;
+  }
+
+  const usageProjectName = await getUsageProjectName(existing.productionOrderId);
+  const appliedStockError = await applyMaterialStockMovements(stockMovements, {
+    projectName: usageProjectName,
+    logUsage: true,
+  });
+  if (appliedStockError) {
+    res.status(409).json({ error: appliedStockError });
+    return;
+  }
+
+  const nextStockConsumedAt =
+    status === 'approved' && !existing.stockConsumedAt
+      ? new Date()
+      : status === 'rejected' && existing.stockConsumedAt
+      ? null
+      : existing.stockConsumedAt;
+
   const [updated] = await db
     .update(materialRequests)
     .set({
@@ -335,6 +568,7 @@ router.patch('/:id/status', validate(updateMaterialRequestStatusSchema), async (
       rejectionComments: status === 'rejected' ? rejectionComments?.trim() ?? null : null,
       adminNotes: adminNotes?.trim() || null,
       reviewedByUserId: reviewedByUserId && UUID_REGEX.test(reviewedByUserId) ? reviewedByUserId : null,
+      stockConsumedAt: nextStockConsumedAt,
       updatedAt: new Date(),
     })
     .where(eq(materialRequests.id, requestId))
