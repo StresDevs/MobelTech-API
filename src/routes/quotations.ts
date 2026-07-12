@@ -100,6 +100,8 @@ const createQuotationEnvironmentProjectsSchema = z.object({
 
 const updateQuotationEnvironmentProjectSchema = quotationEnvironmentSchema.partial().extend({
   modificationNote: z.string().trim().min(1, 'Modification note is required').max(1000),
+  adjustQuotationTotal: z.boolean().optional(),
+  changedBy: z.string().trim().min(1).max(255).optional(),
 });
 
 type QuotationRow = typeof quotations.$inferSelect;
@@ -643,8 +645,9 @@ router.put(
       clientPrice: nextClientPrice,
     });
     const quotationLimit = getQuotationLimit(quotation);
+    const shouldAdjustQuotationTotal = payload.adjustQuotationTotal === true;
 
-    if (nextEnvironmentTotal > quotationLimit) {
+    if (nextEnvironmentTotal > quotationLimit && !shouldAdjustQuotationTotal) {
       rejectEnvironmentBudgetOverflow(res, nextEnvironmentTotal, quotationLimit);
       return;
     }
@@ -775,8 +778,106 @@ router.put(
       });
     }
 
+    if (shouldAdjustQuotationTotal && Math.abs(nextEnvironmentTotal - quotationLimit) > 0.009) {
+      await db
+        .update(quotations)
+        .set({
+          totalAmount: String(nextEnvironmentTotal),
+          updatedAt: new Date(),
+        })
+        .where(eq(quotations.id, quotationId));
+
+      await db.insert(quotationAuditLogs).values({
+        quotationId,
+        field: 'totalAmount',
+        previousValue: String(quotationLimit),
+        nextValue: String(nextEnvironmentTotal),
+        comment: payload.modificationNote.trim(),
+        changedBy: payload.changedBy ?? 'Sistema',
+      });
+    }
+
     res.json(await getHydratedQuotationById(quotationId));
   },
 );
+
+router.delete('/:id/environment-projects/:environmentId', async (req: Request, res: Response) => {
+  await ensureQuotationWorkflowSchema();
+  const quotationId = req.params.id as string;
+  const environmentId = req.params.environmentId as string;
+  const body = (req.body ?? {}) as {
+    adjustQuotationTotal?: boolean;
+    changedBy?: string;
+    comment?: string;
+  };
+
+  const [quotation] = await db.select().from(quotations).where(eq(quotations.id, quotationId));
+  if (!quotation) {
+    res.status(404).json({ error: 'Quotation not found' });
+    return;
+  }
+
+  const [environment] = await db
+    .select()
+    .from(projectEnvironments)
+    .where(and(eq(projectEnvironments.id, environmentId), eq(projectEnvironments.quotationId, quotationId)));
+
+  if (!environment) {
+    res.status(404).json({ error: 'Environment project not found' });
+    return;
+  }
+
+  const shouldAdjustQuotationTotal = body.adjustQuotationTotal !== false;
+  const removedAmount = Number(environment.clientPrice ?? environment.price ?? 0);
+  const previousTotal = getQuotationLimit(quotation);
+  const nextTotal = Math.max(previousTotal - removedAmount, 0);
+  const changedBy = typeof body.changedBy === 'string' && body.changedBy.trim() ? body.changedBy.trim() : 'Sistema';
+  const comment =
+    typeof body.comment === 'string' && body.comment.trim()
+      ? body.comment.trim()
+      : `Eliminación de ambiente ${environment.ambience}`;
+
+  const productionOrderRows = environment.projectId
+    ? await db
+        .select({ id: productionOrders.id })
+        .from(productionOrders)
+        .where(and(eq(productionOrders.projectId, environment.projectId), eq(productionOrders.quotationId, quotationId)))
+    : [];
+  const productionOrderIds = productionOrderRows.map((row) => row.id);
+
+  await db.transaction(async (tx) => {
+    if (productionOrderIds.length > 0) {
+      await tx.delete(notifications).where(inArray(notifications.relatedJobId, productionOrderIds));
+      await tx.delete(productionOrders).where(inArray(productionOrders.id, productionOrderIds));
+    }
+
+    await tx.delete(projectEnvironments).where(eq(projectEnvironments.id, environmentId));
+
+    if (environment.projectId && environment.projectId !== quotation.projectId) {
+      await tx.delete(projects).where(eq(projects.id, environment.projectId));
+    }
+
+    if (shouldAdjustQuotationTotal && Math.abs(nextTotal - previousTotal) > 0.009) {
+      await tx
+        .update(quotations)
+        .set({
+          totalAmount: String(nextTotal),
+          updatedAt: new Date(),
+        })
+        .where(eq(quotations.id, quotationId));
+
+      await tx.insert(quotationAuditLogs).values({
+        quotationId,
+        field: 'totalAmount',
+        previousValue: String(previousTotal),
+        nextValue: String(nextTotal),
+        comment,
+        changedBy,
+      });
+    }
+  });
+
+  res.json(await getHydratedQuotationById(quotationId));
+});
 
 export default router;
