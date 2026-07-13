@@ -4,6 +4,7 @@ import { and, asc, desc, eq, inArray, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
 import {
+  clients,
   contractors,
   materialRequestItemAdjustments,
   materialRequestItems,
@@ -86,19 +87,26 @@ async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inf
         .select({
           id: productionOrders.id,
           projectName: projects.name,
+          clientName: clients.name,
         })
         .from(productionOrders)
         .leftJoin(projects, eq(productionOrders.projectId, projects.id))
+        .leftJoin(clients, eq(projects.clientId, clients.id))
         .where(inArray(productionOrders.id, productionOrderIds))
     : [];
   const jobNameByOrderId = new Map(orderRows.map((order) => [
     order.id,
     order.projectName?.trim() || `Trabajo ${order.id.slice(0, 8)}`,
   ]));
+  const clientNameByOrderId = new Map(orderRows.map((order) => [
+    order.id,
+    order.clientName?.trim() || null,
+  ]));
 
   return requestRows.map((request) => ({
     ...request,
     jobName: request.productionOrderId ? jobNameByOrderId.get(request.productionOrderId) ?? null : null,
+    clientName: request.productionOrderId ? clientNameByOrderId.get(request.productionOrderId) ?? null : null,
     items: itemRows.filter((item) => item.materialRequestId === request.id),
     adjustments: adjustmentRows.filter((adjustment) => adjustment.materialRequestId === request.id),
   }));

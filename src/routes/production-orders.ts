@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
-import { productionItems, productionItemPhases, productionOrders, productionPhaseMachines, productionSchedulePhases, projects } from '../db/schema';
+import { clients, productionItems, productionItemPhases, productionOrders, productionPhaseMachines, productionSchedulePhases, projects } from '../db/schema';
 import { validate } from '../middleware/validate';
 import { ensureProductionSchema } from '../db/ensure-production-schema';
 
@@ -63,7 +63,11 @@ async function hydrateProductionOrder(order: typeof productionOrders.$inferSelec
     .from(productionSchedulePhases)
     .where(eq(productionSchedulePhases.productionOrderId, order.id));
   const [project] = order.projectId
-    ? await db.select({ name: projects.name }).from(projects).where(eq(projects.id, order.projectId))
+    ? await db
+        .select({ name: projects.name, clientName: clients.name })
+        .from(projects)
+        .leftJoin(clients, eq(projects.clientId, clients.id))
+        .where(eq(projects.id, order.projectId))
     : [];
 
   const hydratedItems = await Promise.all(
@@ -76,7 +80,7 @@ async function hydrateProductionOrder(order: typeof productionOrders.$inferSelec
     }),
   );
 
-  return { ...order, projectName: project?.name ?? null, items: hydratedItems, schedulePhases };
+  return { ...order, projectName: project?.name ?? null, clientName: project?.clientName ?? null, items: hydratedItems, schedulePhases };
 }
 
 async function hydrateProductionOrders(rows: Array<typeof productionOrders.$inferSelect>) {
@@ -88,10 +92,15 @@ async function hydrateProductionOrders(rows: Array<typeof productionOrders.$infe
     db.select().from(productionItems).where(inArray(productionItems.productionOrderId, orderIds)),
     db.select().from(productionSchedulePhases).where(inArray(productionSchedulePhases.productionOrderId, orderIds)),
     projectIds.length > 0
-      ? db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projectIds))
+      ? db
+          .select({ id: projects.id, name: projects.name, clientName: clients.name })
+          .from(projects)
+          .leftJoin(clients, eq(projects.clientId, clients.id))
+          .where(inArray(projects.id, projectIds))
       : Promise.resolve([]),
   ]);
   const projectNameById = new Map(projectRows.map((project) => [project.id, project.name]));
+  const clientNameByProjectId = new Map(projectRows.map((project) => [project.id, project.clientName]));
 
   const itemIds = items.map((item) => item.id);
   const phases = itemIds.length > 0
@@ -122,6 +131,7 @@ async function hydrateProductionOrders(rows: Array<typeof productionOrders.$infe
   return rows.map((row) => ({
     ...row,
     projectName: row.projectId ? projectNameById.get(row.projectId) ?? null : null,
+    clientName: row.projectId ? clientNameByProjectId.get(row.projectId) ?? null : null,
     items: itemsByOrderId.get(row.id) ?? [],
     schedulePhases: scheduleByOrderId.get(row.id) ?? [],
   }));

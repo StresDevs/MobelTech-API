@@ -11,7 +11,9 @@ import {
   contractorPayments,
   contractors,
   notifications,
+  productionPhaseMachines,
   productionOrders,
+  productionSchedulePhases,
   projects,
   users,
 } from '../db/schema';
@@ -364,6 +366,55 @@ async function hydratePlans(filters?: {
     .where(and(...paymentConditions))
     .orderBy(desc(contractorPayments.paymentDate), desc(contractorPayments.createdAt));
 
+  const productionOrderIds = Array.from(new Set(rows.map((row) => row.productionOrderId)));
+  const [schedulePhaseRows, phaseMachineRows] = await Promise.all([
+    productionOrderIds.length > 0
+      ? db
+          .select()
+          .from(productionSchedulePhases)
+          .where(inArray(productionSchedulePhases.productionOrderId, productionOrderIds))
+      : Promise.resolve([]),
+    db.select().from(productionPhaseMachines),
+  ]);
+  const schedulePhasesByOrderId = new Map<string, typeof schedulePhaseRows>();
+  schedulePhaseRows
+    .filter((phase) => phase.type === 'actual')
+    .forEach((phase) => {
+      const current = schedulePhasesByOrderId.get(phase.productionOrderId) ?? [];
+      current.push(phase);
+      schedulePhasesByOrderId.set(phase.productionOrderId, current);
+    });
+  const machineLabelByValue = new Map<string, string>();
+  phaseMachineRows.forEach((machine) => {
+    machineLabelByValue.set(machine.id.toLowerCase(), machine.name);
+    machineLabelByValue.set(machine.name.toLowerCase(), machine.name);
+  });
+
+  function getMachineLabel(value?: string | null) {
+    if (!value) return null;
+    return machineLabelByValue.get(value.toLowerCase()) ?? value;
+  }
+
+  function enrichEstimatedSchedule(productionOrderId: string, estimatedSchedule: unknown) {
+    const normalizedSchedule = normalizeEstimatedSchedule(estimatedSchedule);
+    const actualPhases = schedulePhasesByOrderId.get(productionOrderId) ?? [];
+    const actualByPhase = new Map<string, typeof actualPhases[number]>(
+      actualPhases.map((phase) => [phase.phase, phase]),
+    );
+
+    return normalizedSchedule.map((phase) => {
+      const actualPhase = actualByPhase.get(phase.phaseKey);
+      const cuttingMachine = actualPhase?.cuttingMachine ?? phase.cuttingMachine ?? null;
+      return {
+        ...phase,
+        startDate: actualPhase?.startDate ?? phase.startDate,
+        endDate: actualPhase?.endDate ?? phase.endDate,
+        cuttingMachine,
+        machineLabel: getMachineLabel(cuttingMachine) ?? phase.machineLabel ?? null,
+      };
+    });
+  }
+
   return rows.map((row) => {
     const planLines = lines.filter((line) => line.planId === row.id);
     const planPayments = payments.filter((payment) => payment.planId === row.id);
@@ -377,7 +428,7 @@ async function hydratePlans(filters?: {
       totalAmount,
       reviewStatus: row.reviewStatus,
       reviewNotes: row.reviewNotes,
-      estimatedSchedule: normalizeEstimatedSchedule(row.estimatedSchedule),
+      estimatedSchedule: enrichEstimatedSchedule(row.productionOrderId, row.estimatedSchedule),
       paidAmount,
       remainingAmount: Math.max(totalAmount - paidAmount, 0),
       lines: planLines.map((line) => {
