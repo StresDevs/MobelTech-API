@@ -53,19 +53,23 @@ async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inf
 
   let itemRows: typeof materialRequestItems.$inferSelect[] = [];
   let adjustmentRows: typeof materialRequestItemAdjustments.$inferSelect[] = [];
+  const productionOrderIds = Array.from(
+    new Set(requestRows.map((row) => row.productionOrderId).filter((value): value is string => Boolean(value))),
+  );
 
   try {
-    itemRows = await db
-      .select()
-      .from(materialRequestItems)
-      .where(inArray(materialRequestItems.materialRequestId, requestRows.map((row) => row.id)))
-      .orderBy(asc(materialRequestItems.createdAt));
-
-    adjustmentRows = await db
-      .select()
-      .from(materialRequestItemAdjustments)
-      .where(inArray(materialRequestItemAdjustments.materialRequestId, requestRows.map((row) => row.id)))
-      .orderBy(desc(materialRequestItemAdjustments.createdAt));
+    [itemRows, adjustmentRows] = await Promise.all([
+      db
+        .select()
+        .from(materialRequestItems)
+        .where(inArray(materialRequestItems.materialRequestId, requestRows.map((row) => row.id)))
+        .orderBy(asc(materialRequestItems.createdAt)),
+      db
+        .select()
+        .from(materialRequestItemAdjustments)
+        .where(inArray(materialRequestItemAdjustments.materialRequestId, requestRows.map((row) => row.id)))
+        .orderBy(desc(materialRequestItemAdjustments.createdAt)),
+    ]);
   } catch (error) {
     const message = error instanceof Error ? error.message : '';
     const missingMaterialRequestTable = (
@@ -77,8 +81,24 @@ async function hydrateMaterialRequests(requestRows: typeof materialRequests.$inf
     }
   }
 
+  const orderRows = productionOrderIds.length > 0
+    ? await db
+        .select({
+          id: productionOrders.id,
+          projectName: projects.name,
+        })
+        .from(productionOrders)
+        .leftJoin(projects, eq(productionOrders.projectId, projects.id))
+        .where(inArray(productionOrders.id, productionOrderIds))
+    : [];
+  const jobNameByOrderId = new Map(orderRows.map((order) => [
+    order.id,
+    order.projectName?.trim() || `Trabajo ${order.id.slice(0, 8)}`,
+  ]));
+
   return requestRows.map((request) => ({
     ...request,
+    jobName: request.productionOrderId ? jobNameByOrderId.get(request.productionOrderId) ?? null : null,
     items: itemRows.filter((item) => item.materialRequestId === request.id),
     adjustments: adjustmentRows.filter((adjustment) => adjustment.materialRequestId === request.id),
   }));

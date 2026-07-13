@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
-import { productionItems, productionItemPhases, productionOrders, productionPhaseMachines, productionSchedulePhases } from '../db/schema';
+import { productionItems, productionItemPhases, productionOrders, productionPhaseMachines, productionSchedulePhases, projects } from '../db/schema';
 import { validate } from '../middleware/validate';
 import { ensureProductionSchema } from '../db/ensure-production-schema';
 
@@ -62,6 +62,9 @@ async function hydrateProductionOrder(order: typeof productionOrders.$inferSelec
     .select()
     .from(productionSchedulePhases)
     .where(eq(productionSchedulePhases.productionOrderId, order.id));
+  const [project] = order.projectId
+    ? await db.select({ name: projects.name }).from(projects).where(eq(projects.id, order.projectId))
+    : [];
 
   const hydratedItems = await Promise.all(
     items.map(async (item) => {
@@ -73,17 +76,22 @@ async function hydrateProductionOrder(order: typeof productionOrders.$inferSelec
     }),
   );
 
-  return { ...order, items: hydratedItems, schedulePhases };
+  return { ...order, projectName: project?.name ?? null, items: hydratedItems, schedulePhases };
 }
 
 async function hydrateProductionOrders(rows: Array<typeof productionOrders.$inferSelect>) {
   if (rows.length === 0) return [];
 
   const orderIds = rows.map((row) => row.id);
-  const [items, schedulePhases] = await Promise.all([
+  const projectIds = Array.from(new Set(rows.map((row) => row.projectId).filter((value): value is string => Boolean(value))));
+  const [items, schedulePhases, projectRows] = await Promise.all([
     db.select().from(productionItems).where(inArray(productionItems.productionOrderId, orderIds)),
     db.select().from(productionSchedulePhases).where(inArray(productionSchedulePhases.productionOrderId, orderIds)),
+    projectIds.length > 0
+      ? db.select({ id: projects.id, name: projects.name }).from(projects).where(inArray(projects.id, projectIds))
+      : Promise.resolve([]),
   ]);
+  const projectNameById = new Map(projectRows.map((project) => [project.id, project.name]));
 
   const itemIds = items.map((item) => item.id);
   const phases = itemIds.length > 0
@@ -113,6 +121,7 @@ async function hydrateProductionOrders(rows: Array<typeof productionOrders.$infe
 
   return rows.map((row) => ({
     ...row,
+    projectName: row.projectId ? projectNameById.get(row.projectId) ?? null : null,
     items: itemsByOrderId.get(row.id) ?? [],
     schedulePhases: scheduleByOrderId.get(row.id) ?? [],
   }));

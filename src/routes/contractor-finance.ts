@@ -39,6 +39,8 @@ const estimatedScheduleSchema = z.array(z.object({
   phaseLabel: z.string().min(1).max(120),
   startDate: z.string().min(1),
   endDate: z.string().min(1),
+  cuttingMachine: z.string().max(160).optional().nullable(),
+  machineLabel: z.string().max(160).optional().nullable(),
 })).min(1, 'Completa el cronograma estimado antes de enviar la solicitud.');
 
 const planLineSchema = z.object({
@@ -148,15 +150,31 @@ function normalizeEstimatedSchedule(value: unknown) {
   return value
     .map((entry) => {
       if (!entry || typeof entry !== 'object') return null;
-      const schedule = entry as { phaseKey?: unknown; phaseLabel?: unknown; startDate?: unknown; endDate?: unknown };
+      const schedule = entry as {
+        phaseKey?: unknown;
+        phaseLabel?: unknown;
+        startDate?: unknown;
+        endDate?: unknown;
+        cuttingMachine?: unknown;
+        machineLabel?: unknown;
+      };
       return {
         phaseKey: String(schedule.phaseKey ?? ''),
         phaseLabel: String(schedule.phaseLabel ?? ''),
         startDate: String(schedule.startDate ?? ''),
         endDate: String(schedule.endDate ?? ''),
+        cuttingMachine: schedule.cuttingMachine ? String(schedule.cuttingMachine) : null,
+        machineLabel: schedule.machineLabel ? String(schedule.machineLabel) : null,
       };
     })
-    .filter((entry): entry is { phaseKey: string; phaseLabel: string; startDate: string; endDate: string } => (
+    .filter((entry): entry is {
+      phaseKey: string;
+      phaseLabel: string;
+      startDate: string;
+      endDate: string;
+      cuttingMachine: string | null;
+      machineLabel: string | null;
+    } => (
       Boolean(entry?.phaseKey && entry.phaseLabel && entry.startDate && entry.endDate)
     ));
 }
