@@ -56,8 +56,13 @@ export function ensureMaterialRequestsSchema() {
           material_id uuid NOT NULL REFERENCES materials(id) ON DELETE RESTRICT,
           previous_quantity integer NOT NULL,
           new_quantity integer NOT NULL,
+          status varchar(20) NOT NULL DEFAULT 'approved',
           note text,
+          review_comments text,
           changed_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+          reviewed_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+          reviewed_at timestamptz,
+          applied_at timestamptz,
           created_at timestamptz NOT NULL DEFAULT now()
         )
       `;
@@ -65,6 +70,22 @@ export function ensureMaterialRequestsSchema() {
       await sql`
         ALTER TABLE material_requests
         ADD COLUMN IF NOT EXISTS stock_consumed_at timestamptz
+      `;
+
+      await sql`
+        ALTER TABLE material_request_item_adjustments
+        ADD COLUMN IF NOT EXISTS status varchar(20) NOT NULL DEFAULT 'approved',
+        ADD COLUMN IF NOT EXISTS review_comments text,
+        ADD COLUMN IF NOT EXISTS reviewed_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS reviewed_at timestamptz,
+        ADD COLUMN IF NOT EXISTS applied_at timestamptz
+      `;
+
+      await sql`
+        UPDATE material_request_item_adjustments
+        SET status = 'approved',
+            applied_at = COALESCE(applied_at, created_at)
+        WHERE status IS NULL OR status = ''
       `;
 
       await sql`

@@ -446,6 +446,71 @@ router.patch('/:id/items', validate(updateMaterialRequestItemsSchema), async (re
     return;
   }
 
+  const currentAdjustments = await db
+    .select()
+    .from(materialRequestItemAdjustments)
+    .where(eq(materialRequestItemAdjustments.materialRequestId, requestId));
+  const hasPendingAdjustment = currentAdjustments.some((adjustment) => adjustment.status === 'pending');
+
+  if (hasPendingAdjustment) {
+    res.status(409).json({ error: 'Esta solicitud ya tiene un reajuste pendiente de aprobación.' });
+    return;
+  }
+
+  const normalizedChangedBy = changedByUserId && UUID_REGEX.test(changedByUserId) ? changedByUserId : null;
+
+  if (existing.status === 'approved') {
+    await db.insert(materialRequestItemAdjustments).values(
+      changes.map((change) => {
+        const difference = change.nextQuantity - change.item.quantity;
+        const movementLabel = difference > 0 ? 'aumento' : 'reducción';
+        return {
+          id: randomUUID(),
+          materialRequestId: requestId,
+          materialRequestItemId: change.item.id,
+          materialId: change.item.materialId,
+          previousQuantity: change.item.quantity,
+          newQuantity: change.nextQuantity,
+          status: 'pending',
+          note: `Reajuste pendiente: ${movementLabel} de ${Math.abs(difference)} unidad(es), de ${change.item.quantity} a ${change.nextQuantity}.`,
+          changedByUserId: normalizedChangedBy,
+        };
+      }),
+    );
+
+    const [updated] = await db
+      .update(materialRequests)
+      .set({
+        status: 'pending',
+        rejectionComments: null,
+        adminNotes: 'Reajuste de cantidades pendiente de aprobación.',
+        updatedAt: new Date(),
+      })
+      .where(eq(materialRequests.id, requestId))
+      .returning();
+
+    const [contractor] = await db
+      .select()
+      .from(contractors)
+      .where(eq(contractors.id, contractorId));
+
+    const adminUsers = await getOperationsRecipients();
+    if (adminUsers.length > 0) {
+      await db.insert(notifications).values(
+        adminUsers.map((user) => ({
+          id: randomUUID(),
+          recipientUserId: user.id,
+          message: `${contractor?.name ?? 'Un contratista'} solicitó aprobar un reajuste de materiales.`,
+          relatedJobId: existing.productionOrderId,
+        })),
+      );
+    }
+
+    const [hydrated] = await hydrateMaterialRequests([updated]);
+    res.json(hydrated);
+    return;
+  }
+
   const nextQuantityByItemId = new Map(
     (items as Array<z.infer<typeof updateMaterialRequestItemsSchema>['items'][number]>)
       .map((item) => [item.id, item.quantity]),
@@ -477,8 +542,6 @@ router.patch('/:id/items', validate(updateMaterialRequestItemsSchema), async (re
     return;
   }
 
-  const normalizedChangedBy = changedByUserId && UUID_REGEX.test(changedByUserId) ? changedByUserId : null;
-
   for (const change of changes) {
     await db
       .update(materialRequestItems)
@@ -494,8 +557,10 @@ router.patch('/:id/items', validate(updateMaterialRequestItemsSchema), async (re
       materialId: change.item.materialId,
       previousQuantity: change.item.quantity,
       newQuantity: change.nextQuantity,
+      status: 'approved',
       note: `Cantidad reajustada de ${change.item.quantity} a ${change.nextQuantity}.`,
       changedByUserId: normalizedChangedBy,
+      appliedAt: new Date(),
     })),
   );
 
@@ -552,6 +617,96 @@ router.patch('/:id/status', validate(updateMaterialRequestStatusSchema), async (
     .select()
     .from(materialRequestItems)
     .where(eq(materialRequestItems.materialRequestId, requestId));
+  const pendingAdjustments = await db
+    .select()
+    .from(materialRequestItemAdjustments)
+    .where(eq(materialRequestItemAdjustments.materialRequestId, requestId))
+    .then((rows) => rows.filter((adjustment) => adjustment.status === 'pending'));
+
+  if (pendingAdjustments.length > 0 && existing.stockConsumedAt) {
+    const stockMovements = status === 'approved'
+      ? pendingAdjustments.map((adjustment) => ({
+          materialId: adjustment.materialId,
+          quantityDelta: adjustment.previousQuantity - adjustment.newQuantity,
+          usageNote: `Consumo por aprobación de reajuste de material: ${adjustment.previousQuantity} a ${adjustment.newQuantity}.`,
+        }))
+      : [];
+    const stockError = await validateMaterialStockMovements(stockMovements);
+    if (stockError) {
+      res.status(409).json({ error: stockError });
+      return;
+    }
+
+    const usageProjectName = await getUsageProjectName(existing.productionOrderId);
+    const appliedStockError = await applyMaterialStockMovements(stockMovements, {
+      projectName: usageProjectName,
+      logUsage: true,
+    });
+    if (appliedStockError) {
+      res.status(409).json({ error: appliedStockError });
+      return;
+    }
+
+    const normalizedReviewerId = reviewedByUserId && UUID_REGEX.test(reviewedByUserId) ? reviewedByUserId : null;
+    const reviewedAt = new Date();
+
+    if (status === 'approved') {
+      for (const adjustment of pendingAdjustments) {
+        await db
+          .update(materialRequestItems)
+          .set({ quantity: adjustment.newQuantity })
+          .where(eq(materialRequestItems.id, adjustment.materialRequestItemId));
+      }
+    }
+
+    await Promise.all(
+      pendingAdjustments.map((adjustment) => db
+        .update(materialRequestItemAdjustments)
+        .set({
+          status,
+          reviewComments: status === 'rejected' ? rejectionComments?.trim() ?? null : adminNotes?.trim() || null,
+          reviewedByUserId: normalizedReviewerId,
+          reviewedAt,
+          appliedAt: status === 'approved' ? reviewedAt : adjustment.appliedAt,
+        })
+        .where(eq(materialRequestItemAdjustments.id, adjustment.id))),
+    );
+
+    const [updated] = await db
+      .update(materialRequests)
+      .set({
+        status: 'approved',
+        rejectionComments: null,
+        adminNotes: status === 'approved'
+          ? adminNotes?.trim() || 'Reajuste de cantidades aprobado.'
+          : `Reajuste rechazado: ${rejectionComments?.trim()}`,
+        reviewedByUserId: normalizedReviewerId,
+        updatedAt: reviewedAt,
+      })
+      .where(eq(materialRequests.id, requestId))
+      .returning();
+
+    const [contractor] = await db
+      .select()
+      .from(contractors)
+      .where(eq(contractors.id, updated.contractorId));
+
+    if (contractor?.userId) {
+      await db.insert(notifications).values({
+        id: randomUUID(),
+        recipientUserId: contractor.userId,
+        message: status === 'approved'
+          ? 'Tu reajuste de solicitud de materiales fue aprobado.'
+          : `Tu reajuste de solicitud de materiales fue rechazado: ${rejectionComments?.trim()}`,
+        relatedJobId: updated.productionOrderId ?? null,
+      });
+    }
+
+    const [hydrated] = await hydrateMaterialRequests([updated]);
+    res.json(hydrated);
+    return;
+  }
+
   const stockMovements =
     status === 'approved' && !existing.stockConsumedAt
       ? currentItems.map((item) => ({

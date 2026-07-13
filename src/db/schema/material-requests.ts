@@ -5,6 +5,7 @@ import {
   text,
   timestamp,
   uuid,
+  varchar,
 } from 'drizzle-orm/pg-core';
 import { contractors } from './contractors';
 import { materials } from './inventory';
@@ -63,8 +64,14 @@ export const materialRequestItemAdjustments = pgTable('material_request_item_adj
     .references(() => materials.id, { onDelete: 'restrict' }),
   previousQuantity: integer('previous_quantity').notNull(),
   newQuantity: integer('new_quantity').notNull(),
+  status: varchar('status', { length: 20 }).notNull().default('approved'),
   note: text('note'),
+  reviewComments: text('review_comments'),
   changedByUserId: uuid('changed_by_user_id')
     .references(() => users.id, { onDelete: 'set null' }),
+  reviewedByUserId: uuid('reviewed_by_user_id')
+    .references(() => users.id, { onDelete: 'set null' }),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+  appliedAt: timestamp('applied_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
